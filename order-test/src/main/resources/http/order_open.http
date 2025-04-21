@@ -1,0 +1,69 @@
+### 创建订单，市场价格，按照金额成交
+POST localhost:8090/order/create
+Content-Type: application/json
+
+{
+  "priceType": 0,
+  "dealType": 0,
+  "price": 0,
+  "side": "BUY",
+  "open": "OPEN",
+  "positionType": 0,
+  "leverageLevel": 5,
+  "uid": 1000,
+  "amount": 5000
+}
+
+###
+
+### 创建订单，限价，按照成交数量下单
+POST localhost:8090/order/create
+Content-Type: application/json
+
+{
+  "priceType": 1,
+  "dealType": 1,
+  "price": 90000,
+  "side": "BUY",
+  "open": "OPEN",
+  "positionType": 0,
+  "leverageLevel": 5,
+  "uid": 1000,
+  "volume": 0.15,
+  "positionId": 19
+}
+
+###
+
+
+### 创建订单，限价空单
+POST localhost:8090/order/create
+Content-Type: application/json
+
+{
+  "priceType": 1,
+  "dealType": 1,
+  "price": 80000,
+  "side": "SELL",
+  "open": "OPEN",
+  "positionType": 0,
+  "leverageLevel": 5,
+  "uid": 1000,
+  "volume": 0.11
+}
+
+### 平仓单子
+POST localhost:8090/order/create
+Content-Type: application/json
+
+{
+  "priceType": 1,
+  "dealType": 1,
+  "price": 81000,
+  "side": "SELL",
+  "open": "CLOSE",
+  "leverageLevel": 5,
+  "uid": 1000,
+  "volume": 0,
+  "positionId": 14
+}

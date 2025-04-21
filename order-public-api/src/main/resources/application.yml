@@ -1,0 +1,31 @@
+server:
+  port: 8090
+  shutdown: graceful
+
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 60s
+  datasource:
+    url: jdbc:mysql://localhost:3306/futures
+    username: root
+    password: admin123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  application:
+    name: futures-order-api
+
+#mybatis
+mybatis-plus:
+  configuration:
+    mapUnderscoreToCamelCase: true
+    #log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  mapper-locations: classpath*:/mapper/**/*.xml
+logging:
+  level:
+    com:
+      tx:
+        common:
+          mapper: debug
+
+kafka:
+  servers: localhost:9092
+

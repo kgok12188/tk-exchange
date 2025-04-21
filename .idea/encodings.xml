@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Encoding">
+    <file url="file://$PROJECT_DIR$/job-service/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-admin-api/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-common/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-common/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-match/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-match/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-public-api/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-service/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-service/src/main/resources" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-test/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/order-trigger/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/src/main/java" charset="UTF-8" />
+    <file url="file://$PROJECT_DIR$/src/main/resources" charset="UTF-8" />
+  </component>
+</project>

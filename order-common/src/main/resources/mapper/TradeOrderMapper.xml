@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.tx.common.mapper.TradeOrderMapper">
+
+    <insert id="upsert">
+        insert into trade_order (uid, match_id, order_id, side, price, volume, fee, role, status, txid,
+                                 position_before_volume, position_after_volume, ctime, mtime)
+        values (#{uid}, #{matchId}, #{orderId}, #{side}, #{price}, #{volume}, #{fee}, #{role}, #{status}, #{txid},
+                #{positionBeforeVolume}, #{positionAfterVolume}, #{ctime}, #{mtime})
+        on duplicate key update status                 = IF(${txid} > txid, #{status}, status),
+                                fee                    = IF(${txid} > txid, #{fee}, fee),
+                                auto_update_time       = IF(${txid} > txid, now(), auto_update_time),
+                                position_before_volume = IF(${txid} > txid, #{positionBeforeVolume}, position_before_volume),
+                                position_after_volume  = IF(${txid} > txid, #{positionAfterVolume}, position_after_volume),
+                                txid                   = IF(${txid} > txid, #{txid}, txid)
+    </insert>
+
+</mapper>

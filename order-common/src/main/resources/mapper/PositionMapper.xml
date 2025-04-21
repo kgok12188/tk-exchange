@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.tx.common.mapper.PositionMapper">
+
+    <insert id="upsert">
+        insert into co_position (id, uid, symbol, market_id, volume, close_volume, pending_close_volume,
+                                 leverage_level, fee, open_price, close_price, hold_amount, realized_amount, status,
+                                 position_type, ctime, mtime, side, txid)
+            value (#{id}, #{uid}, #{symbol}, #{marketId}, #{volume}, #{closeVolume}, #{pendingCloseVolume},
+                   #{leverageLevel}, #{fee}, #{openPrice}, #{closePrice}, #{holdAmount}, #{realizedAmount}, #{status},
+                   #{positionType}, #{ctime}, #{mtime}, #{side}, #{txid})
+        on duplicate key update volume               = IF(#{txid} > txid, #{volume}, volume),
+                                close_volume         = IF(#{txid} > txid, #{closeVolume}, close_volume),
+                                pending_close_volume = IF(#{txid} > txid, #{pendingCloseVolume}, pending_close_volume),
+                                leverage_level       = IF(#{txid} > txid, #{leverageLevel}, leverage_level),
+                                fee                  = IF(#{txid} > txid, #{fee}, fee),
+                                open_price           = IF(#{txid} > txid, #{openPrice}, open_price),
+                                close_price          = IF(#{txid} > txid, #{closePrice}, close_price),
+                                hold_amount          = IF(#{txid} > txid, #{holdAmount}, hold_amount),
+                                realized_amount      = IF(#{txid} > txid, #{realizedAmount}, realized_amount),
+                                status               = IF(#{txid} > txid, #{status}, status),
+                                mtime                = IF(#{txid} > txid, #{mtime}, mtime),
+                                txid                 = IF(#{txid} > txid, #{txid}, txid)
+    </insert>
+
+</mapper>

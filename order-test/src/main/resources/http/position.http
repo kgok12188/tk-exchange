@@ -1,0 +1,7 @@
+### 创建订单，市场价格，按照金额成交
+POST localhost:8090/position/get_assets_list
+Content-Type: application/json
+
+{
+  "uid": 1000
+}

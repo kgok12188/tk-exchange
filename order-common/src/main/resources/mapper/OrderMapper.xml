@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.tx.common.mapper.OrderMapper">
+
+    <insert id="upsert">
+        insert into co_order (id, uid, position_id, symbol, market_id, amount, volume, deal_type, deal_amount,
+                              deal_volume, price_type, price, fee, status, leverage_level, side, open,
+                              position_type, margin, ctime, mtime,
+                              realized_amount,
+                              completed_time,
+                              cancel_time, cancel_order, txid)
+            value (#{id}, #{uid}, #{positionId}, #{symbol}, #{marketId}, #{amount}, #{volume}, #{dealType},
+                   #{dealAmount},
+                   #{dealVolume}, #{priceType}, #{price}, #{fee}, #{status}, #{leverageLevel}, #{side}, #{open},
+                   #{positionType}, #{margin}, #{ctime}, #{mtime},
+                   #{realizedAmount},
+                   #{completedTime}, #{cancelTime}, #{cancelOrder}, #{txid})
+        on duplicate key update position_id      = IF(#{txid} > txid, #{positionId}, position_id),
+                                status           = IF(#{txid} > txid, #{status}, status),
+                                amount           = IF(#{txid} > txid, #{amount}, amount),
+                                volume           = IF(#{txid} > txid, #{volume}, volume),
+                                price            = IF(#{txid} > txid, #{price}, price),
+                                deal_amount      = IF(#{txid} > txid, #{dealAmount}, deal_amount),
+                                deal_volume      = IF(#{txid} > txid, #{dealVolume}, deal_volume),
+                                fee              = IF(#{txid} > txid, #{fee}, fee),
+                                status           = IF(#{txid} > txid, #{status}, status),
+                                mtime            = IF(#{txid} > txid, #{mtime}, mtime),
+                                realized_amount  = IF(#{txid} > txid, #{realizedAmount}, realized_amount),
+                                margin           = IF(#{txid} > txid, #{margin}, margin),
+                                completed_time   = IF(#{txid} > txid, #{completedTime}, completed_time),
+                                cancel_time      = IF(#{txid} > txid, #{cancelTime}, cancel_time),
+                                cancel_order     = IF(#{txid} > txid, #{cancelOrder}, cancel_order),
+                                auto_update_time = IF(#{txid} > txid, now(), auto_update_time),
+                                txid             = IF(#{txid} > txid, #{txid}, txid)
+    </insert>
+
+</mapper>

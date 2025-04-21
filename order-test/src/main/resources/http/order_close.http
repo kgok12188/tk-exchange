@@ -1,0 +1,17 @@
+
+### 平仓单子
+POST localhost:8090/order/create
+Content-Type: application/json
+
+{
+  "priceType": 1,
+  "dealType": 1,
+  "price": 81000,
+  "side": "SELL",
+  "open": "CLOSE",
+  "leverageLevel": 5,
+  "positionType": 0,
+  "uid": 1000,
+  "volume": 0,
+  "positionId": 19
+}

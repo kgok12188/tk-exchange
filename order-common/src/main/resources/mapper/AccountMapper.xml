@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.tx.common.mapper.AccountMapper">
+
+    <insert id="upsert">
+        insert into account (uid, coin_id, coin_name,
+                             available_balance, cross_margin_frozen, isolated_margin_frozen, order_frozen,
+                             txid, ctime, mtime)
+        values (#{uid}, #{coinId}, #{coinName},
+                #{availableBalance}, #{crossMarginFrozen}, #{isolatedMarginFrozen}, #{orderFrozen},
+                #{txid}, #{ctime}, #{mtime})
+        on duplicate key update available_balance      = IF(${txid} > txid, #{availableBalance}, available_balance),
+                                cross_margin_frozen    = IF(${txid} > txid, #{crossMarginFrozen}, cross_margin_frozen),
+                                isolated_margin_frozen = IF(${txid} > txid, #{isolatedMarginFrozen}, isolated_margin_frozen),
+                                order_frozen           = IF(${txid} > txid, #{orderFrozen}, order_frozen),
+                                mtime                  = IF(${txid} > txid, #{mtime}, mtime),
+                                auto_update_time       = IF(${txid} > txid, now(), auto_update_time),
+                                txid                   = IF(${txid} > txid, ${txid}, txid)
+    </insert>
+
+</mapper>
