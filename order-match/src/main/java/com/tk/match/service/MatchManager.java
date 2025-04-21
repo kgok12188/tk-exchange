@@ -23,7 +23,7 @@ import java.util.Properties;
 public class MatchManager {
 
 
-    private static final Map<Long, MatchService> matchServiceMap = new HashMap<>();
+    private static final Map<Integer, MatchService> matchServiceMap = new HashMap<>();
 
     private final MarketConfigService marketConfigService;
 
@@ -68,7 +68,7 @@ public class MatchManager {
     }
 
 
-    public Map<Long, MatchService> getMatchServices() {
+    public Map<Integer, MatchService> getMatchServices() {
         return matchServiceMap;
     }
 

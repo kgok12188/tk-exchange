@@ -105,7 +105,7 @@ CREATE TABLE co_order
     cancel_time      TIMESTAMP                DEFAULT CURRENT_TIMESTAMP,
     cancel_order     int(3)          not null default 0 comment '0 不取消 1 取消',
     realized_amount  DECIMAL(32, 16) NOT NULL default 0 comment '已实现盈亏',
-    txid             INT(20)         not null default 0,
+    txid             bigint(20)         not null default 0,
     auto_update_time TIMESTAMP                DEFAULT CURRENT_TIMESTAMP comment '数据库更新时间',
     key (uid, market_id),
     key (status, uid)
@@ -145,8 +145,8 @@ CREATE TABLE trade_order
     ctime                  TIMESTAMP                DEFAULT CURRENT_TIMESTAMP,
     mtime                  TIMESTAMP                DEFAULT CURRENT_TIMESTAMP,
     auto_update_time       TIMESTAMP                DEFAULT CURRENT_TIMESTAMP comment '数据库更新时间',
-    remove_match           boolean         not null default false comment 'true 完成了撮合',
-    txid                   INT(20)         not null default 0,
+    full_match           boolean         not null default false comment 'true 完成了撮合',
+    txid                   bigint(20)         not null default 0,
     unique key (order_id, match_id),
     key (uid)
 );
@@ -173,7 +173,7 @@ CREATE TABLE co_position
     ctime                TIMESTAMP                DEFAULT CURRENT_TIMESTAMP,
     mtime                TIMESTAMP                DEFAULT CURRENT_TIMESTAMP comment '业务代码的更新时间',
     auto_update_time     TIMESTAMP                DEFAULT CURRENT_TIMESTAMP comment '数据库更新时间',
-    txid                 INT(20)         not null default 0,
+    txid                 bigint(20)         not null default 0,
     liq_order_id         bigint(20)               default 0 comment '爆仓订单id,不爆仓是空',
     key (uid, market_id),
     key (ctime),

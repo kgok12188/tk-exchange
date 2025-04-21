@@ -19,7 +19,7 @@ public class MarketConfig {
      */
     @TableId(value = "id", type = IdType.AUTO)
     @ApiModelProperty(value = "市场ID")
-    private Long id;
+    private Integer id;
 
     /**
      * 卖方市场ID

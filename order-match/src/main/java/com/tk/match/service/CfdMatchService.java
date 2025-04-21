@@ -417,7 +417,7 @@ public class CfdMatchService extends MatchService {
                 }
                 messages.add(new Message(0L, new LinkedList<>(), price));
                 TradePrice msg = new TradePrice();
-                msg.setMarketId(1);
+                msg.setMarketId(marketConfig.getId());
                 msg.setPrice(price);
                 msg.setTime(System.currentTimeMillis());
                 kafkaProducer.send(new ProducerRecord<>(KafkaTopic.TRADE_PRICE, JSON.toJSONString(msg)), (metadata, exception) -> {
