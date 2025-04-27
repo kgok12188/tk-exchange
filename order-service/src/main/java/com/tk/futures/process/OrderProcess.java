@@ -28,17 +28,14 @@ import java.util.function.Consumer;
 @Service
 public class OrderProcess extends BaseProcess {
 
-    private final TradeOrderService tradeOrderService;
     private final PositionIdGenerator positionIdGenerator;
     private final OrderIdGenerator orderIdGenerator;
 
     @Autowired
     public OrderProcess(TradeOrderService tradeOrderService, PositionIdGenerator positionIdGenerator, OrderIdGenerator orderIdGenerator) {
-        this.tradeOrderService = tradeOrderService;
         this.positionIdGenerator = positionIdGenerator;
         this.orderIdGenerator = orderIdGenerator;
     }
-
 
     /**
      * 开仓

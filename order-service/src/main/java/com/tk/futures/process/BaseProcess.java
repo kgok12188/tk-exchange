@@ -120,7 +120,7 @@ public abstract class BaseProcess {
         private TxIdGenerator txIdGenerator;
         private KafkaProducer<String, String> kafkaProducer;
         private UserDataService userDataService;
-        private Map<String, MarketConfig> markerConfigs;
+        private Map<Integer, MarketConfig> markerConfigs;
     }
 
 }

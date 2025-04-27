@@ -269,9 +269,7 @@ public class CfdMatchService extends MatchService {
                 Message message = messages.poll(10, TimeUnit.MILLISECONDS);
                 if (message != null) {
                     if (message.txid < 0) {
-                        if (!orderWrappers.isEmpty()) {
-                            doRecoverCheckPoint(message.getBeginOffset(), message.getLatestOffset());
-                        }
+                        doRecoverCheckPoint(message.getBeginOffset(), message.getLatestOffset());
                         return;
                     }
                     List<TradeOrder> tradeOrders = new ArrayList<>();
@@ -337,6 +335,20 @@ public class CfdMatchService extends MatchService {
             kafkaManager.deleteBeginOffset(marketConfig, latestOffset);
             return;
         }
+        boolean includeDeleteOffset = false;
+        for (Long orderId : orderWrappers.keySet()) {
+            OrderWrapper orderWrapper = orderWrappers.get(orderId);
+            if (orderWrapper.getOffset() <= beginOffset) {
+                orderWrappers.remove(orderId, true);
+                orderWrapper.setOffset(this.offset);
+                orderWrappers.put(orderId, orderWrapper);
+                includeDeleteOffset = true;
+            }
+        }
+        if (includeDeleteOffset) {
+            return;
+        }
+
         long diff = latestOffset - beginOffset;
         long size = orderWrappers.size();
         int maxCount = Math.min(Math.max(orderWrappers.size() / 5, 1), 200);
@@ -355,7 +367,7 @@ public class CfdMatchService extends MatchService {
             orderWrappers.put(orderId, orderWrapper);
         }
         if (deleteOffset > 0) {
-            kafkaManager.deleteBeginOffset(marketConfig, deleteOffset);
+            kafkaManager.deleteBeginOffset(marketConfig, deleteOffset - 1);
         }
     }
 

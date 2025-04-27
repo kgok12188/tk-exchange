@@ -6,7 +6,6 @@ import com.tx.common.entity.WorkerOrderGroup;
 import com.tx.common.entity.WorkerOrderGroupJvm;
 import com.tx.common.service.WorkerOrderGroupJvmService;
 import com.tx.common.service.WorkerOrderGroupService;
-import com.tk.futures.generator.OrderIdGeneratorImpl;
 import lombok.SneakyThrows;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.curator.framework.CuratorFramework;
@@ -41,7 +40,6 @@ public class ZookeeperService implements SmartLifecycle {
 
     private final ProcessService processService;
 
-    private final DataSynchronizationService dataSynchronizationService;
     private final WorkerOrderGroupService workerOrderGroupService;
 
     private volatile boolean running = false;
@@ -62,7 +60,6 @@ public class ZookeeperService implements SmartLifecycle {
     private final OrderIdGenerator orderIdGenerator;
 
     public ZookeeperService(WorkerOrderGroupJvmService workerOrderGroupJvmService,
-                            DataSynchronizationService dataSynchronizationService,
                             ProcessService processService,
                             @Value("${zookeeper.servers}") String zookeeperUrl, @Value("${kafka.servers}") String kafkaServers,
                             OrderIdGenerator orderIdGenerator,
@@ -72,7 +69,6 @@ public class ZookeeperService implements SmartLifecycle {
         jvmId = addr.toString() + ":" + UUID.randomUUID().toString().replaceAll("-", "");
         this.zookeeperUrl = zookeeperUrl;
         this.workerOrderGroupJvmService = workerOrderGroupJvmService;
-        this.dataSynchronizationService = dataSynchronizationService;
         this.processService = processService;
         kafkaProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServers);
         kafkaProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
@@ -180,8 +176,6 @@ public class ZookeeperService implements SmartLifecycle {
             }
         });
         leaderLatch.start();
-
-        dataSynchronizationService.start(group);
     }
 
     @Override
@@ -190,11 +184,6 @@ public class ZookeeperService implements SmartLifecycle {
             processService.stop();
         } catch (Exception e) {
             logger.warn("commandService", e);
-        }
-        try {
-            dataSynchronizationService.stop();
-        } catch (Exception e) {
-            logger.warn("syncDataToDatabaseService", e);
         }
         logger.info("stop_kafka");
         if (kafkaProducer != null) {

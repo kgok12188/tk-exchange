@@ -5,12 +5,8 @@ import com.google.common.collect.Lists;
 import com.tk.futures.model.UserData;
 import com.tx.common.entity.*;
 import com.tx.common.kafka.KafkaTopic;
-import com.tx.common.mapper.*;
 import com.tx.common.message.AsyncMessageItem;
-import com.tx.common.service.AccountService;
-import com.tx.common.service.OrderService;
-import com.tx.common.service.PositionService;
-import com.tx.common.service.UserService;
+import com.tx.common.service.*;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
@@ -34,19 +30,15 @@ public class UserDataService {
     private AccountService accountService;
     @Autowired
     private UserService userService;
+    @Autowired
+    private PersistenceService persistenceService;
 
-    @Autowired
-    private TransferMapper transferMapper;
-    @Autowired
-    private AccountMapper accountMapper;
-    @Autowired
-    private TradeOrderMapper tradeOrderMapper;
-    @Autowired
-    private OrderMapper orderMapper;
-    @Autowired
-    private PositionMapper positionMapper;
+    private String groupId;
 
-    public UserData load(Long uid) {
+    public UserData load(Long uid, String groupId) {
+        if (this.groupId == null) {
+            this.groupId = groupId;
+        }
         if (uid == null) {
             return null;
         }
@@ -67,56 +59,15 @@ public class UserDataService {
         if (CollectionUtils.isEmpty(messageItems)) {
             return;
         }
-        ProducerRecord<String, String> record = new ProducerRecord<>(KafkaTopic.SYNC_TO_DB, String.valueOf(uid), JSON.toJSONString(messageItems));
+        ProducerRecord<String, String> record = new ProducerRecord<>(KafkaTopic.SYNC_TO_DB + groupId, String.valueOf(uid), JSON.toJSONString(messageItems));
         try {
             kafkaProducer.send(record);
         } catch (Exception e) {
             logger.error("send_mq_messageItems {}", JSON.toJSONString(messageItems), e);
             try {
-                persistence(messageItems);
+                persistenceService.flush(messageItems);
             } catch (Exception ex) {
                 logger.error("persistence_messageItems {}", JSON.toJSONString(messageItems), ex);
-            }
-        }
-    }
-
-    /**
-     * 数据持久化到数据库
-     *
-     * @param messageItems 命令消息
-     */
-    public void persistence(List<AsyncMessageItem> messageItems) {
-        for (AsyncMessageItem messageItem : messageItems) {
-            AsyncMessageItem.Type type = AsyncMessageItem.Type.fromValue(messageItem.getType());
-            if (type == null) {
-                continue;
-            }
-            switch (type) {
-                case ACCOUNT:
-                    for (Object message : messageItem.getMessages()) {
-                        accountMapper.upsert((Account) message);
-                    }
-                    break;
-                case TRANSFER:
-                    for (Object message : messageItem.getMessages()) {
-                        transferMapper.upsert((Transfer) message);
-                    }
-                    break;
-                case ORDER:
-                    for (Object message : messageItem.getMessages()) {
-                        orderMapper.upsert((Order) message);
-                    }
-                    break;
-                case POSITION:
-                    for (Object message : messageItem.getMessages()) {
-                        positionMapper.upsert((Position) message);
-                    }
-                    break;
-                case TRADE_ORDER:
-                    for (Object message : messageItem.getMessages()) {
-                        tradeOrderMapper.upsert((TradeOrder) message);
-                    }
-                    break;
             }
         }
     }

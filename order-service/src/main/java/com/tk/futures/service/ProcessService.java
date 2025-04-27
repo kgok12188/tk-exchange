@@ -3,11 +3,11 @@ package com.tk.futures.service;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
-import com.google.common.collect.Lists;
 import com.tk.futures.generator.TxIdGenerator;
 import com.tk.futures.generator.TxIdGeneratorImpl;
 import com.tk.futures.model.AsyncMessageItems;
 import com.tk.futures.model.DataContext;
+import com.tk.futures.model.MarketCachedMapOptions;
 import com.tk.futures.model.UserData;
 import com.tk.futures.process.BaseProcess;
 import com.tk.futures.process.OrderProcess;
@@ -21,11 +21,9 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerRecord;
-import org.redisson.api.LocalCachedMapOptions;
 import org.redisson.api.RLocalCachedMap;
 import org.redisson.api.RedissonClient;
-import org.redisson.codec.JsonJacksonCodec;
+import org.redisson.codec.TypedJsonJacksonCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
@@ -50,10 +48,9 @@ public class ProcessService implements ApplicationContextAware {
 
     private final Map<Integer, DataContext> globalDataContext = new ConcurrentHashMap<>();
     private final Map<Integer, TxIdGenerator> txIdGeneratorMap = new ConcurrentHashMap<>();
-    public final static Map<Integer, TradePrice> tradePriceMap = new ConcurrentHashMap<>(2048);
+    public final static Map<Integer, TradePrice> tradePrices = new ConcurrentHashMap<>(2048); // 缓存最新价格
     private static final Logger logger = LoggerFactory.getLogger(ProcessService.class);
     private final int THREAD_NUM = Runtime.getRuntime().availableProcessors();
-    private final RedissonClient redissonClient;
     private final MarketConfigService marketConfigService;
     private OrderProcess orderProcess;
     private AccountService accountService;
@@ -70,7 +67,7 @@ public class ProcessService implements ApplicationContextAware {
     private OrderService orderService;
     private String groupId;
 
-    private final RLocalCachedMap<String, MarketConfig> marketConfigs;
+    private final RLocalCachedMap<Integer, MarketConfig> marketConfigs;
 
     private final AtomicBoolean atomicLoadUserData = new AtomicBoolean(false);
 
@@ -91,14 +88,15 @@ public class ProcessService implements ApplicationContextAware {
             long start = 0;
             int count = 0;
             do {
-                List<User> users = userService.lambdaQuery().eq(User::getGroupName, groupId).gt(User::getId, start).orderByAsc(User::getId).last("limit 100").list();
+                List<User> users = userService.lambdaQuery().eq(User::getGroupName, groupId)
+                        .gt(User::getId, start).orderByAsc(User::getId).last("limit 100").list();
                 if (CollectionUtils.isEmpty(users)) {
                     break;
                 }
                 count += users.size();
                 for (User user : users) {
                     start = Math.max(start, user.getId());
-                    UserData userData = userDataService.load(user.getId());
+                    UserData userData = userDataService.load(user.getId(), groupId);
                     DataContext dataContext = globalDataContext.get(userSlot(user.getId()));
                     dataContext.put(user.getId(), userData);
                 }
@@ -109,9 +107,7 @@ public class ProcessService implements ApplicationContextAware {
 
     public ProcessService(@Value("${kafka.servers}") String kafkaServers, RedissonClient redissonClient, MarketConfigService marketConfigService) {
         this.servers = kafkaServers;
-        this.redissonClient = redissonClient;
-        LocalCachedMapOptions<String, MarketConfig> options = LocalCachedMapOptions.defaults();
-        marketConfigs = redissonClient.getLocalCachedMap("market_config_redis_and_local", new JsonJacksonCodec(), options);
+        marketConfigs = redissonClient.getLocalCachedMap("market_config_redis_and_local_001", new TypedJsonJacksonCodec(Integer.class, MarketConfig.class), MarketCachedMapOptions.defaults());
         this.marketConfigService = marketConfigService;
     }
 
@@ -141,7 +137,7 @@ public class ProcessService implements ApplicationContextAware {
         messageQueueService.stop(); // 停止异步消息处理
         isSlave = true;
         if (consumerMasterCountDownLatch == null) {
-            new Thread(() -> syncMasterMemoryData(groupId), "consumerMaster").start();
+            new Thread(() -> fetchMaster(groupId), "fetch-master").start();
         }
     }
 
@@ -150,7 +146,7 @@ public class ProcessService implements ApplicationContextAware {
      *
      * @param groupId 分组名称
      */
-    private void syncMasterMemoryData(String groupId) {
+    private void fetchMaster(String groupId) {
         consumerMasterCountDownLatch = new CountDownLatch(1);
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, servers);
@@ -160,7 +156,7 @@ public class ProcessService implements ApplicationContextAware {
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
         // 处理请求
         try (KafkaConsumer<String, String> kafkaConsumer = new KafkaConsumer<>(props)) {
-            kafkaConsumer.subscribe(Collections.singletonList(KafkaTopic.SYNC_TO_DB));
+            kafkaConsumer.subscribe(Collections.singletonList(KafkaTopic.SYNC_TO_DB + groupId));
             ConsumerRecords<String, String> consumerRecords;
             long lastFreshTime = 0;
             do {
@@ -193,7 +189,7 @@ public class ProcessService implements ApplicationContextAware {
                                 Account account = messages.getJSONObject(j).toJavaObject(Account.class);
                                 Map<Long, UserData> map = globalDataContext.get(userSlot(account.getUid()));
                                 UserData userData = map.get(account.getUid());
-                                userData = userData == null ? userDataService.load(account.getUid()) : userData;
+                                userData = userData == null ? userDataService.load(account.getUid(), groupId) : userData;
                                 if (userData != null) {
                                     userData.mergerAccount(account);
                                 }
@@ -204,7 +200,7 @@ public class ProcessService implements ApplicationContextAware {
                                 Order order = messages.getJSONObject(j).toJavaObject(Order.class);
                                 Map<Long, UserData> map = globalDataContext.get(userSlot(order.getUid()));
                                 UserData userData = map.get(order.getUid());
-                                userData = userData == null ? userDataService.load(order.getUid()) : userData;
+                                userData = userData == null ? userDataService.load(order.getUid(), groupId) : userData;
                                 if (userData != null) {
                                     userData.mergerOrder(order);
                                 }
@@ -215,7 +211,7 @@ public class ProcessService implements ApplicationContextAware {
                                 Position position = messages.getJSONObject(j).toJavaObject(Position.class);
                                 Map<Long, UserData> map = globalDataContext.get(userSlot(position.getUid()));
                                 UserData userData = map.get(position.getUid());
-                                userData = userData == null ? userDataService.load(position.getUid()) : userData;
+                                userData = userData == null ? userDataService.load(position.getUid(), groupId) : userData;
                                 if (userData != null) {
                                     userData.mergerPosition(position);
                                 }
@@ -301,7 +297,7 @@ public class ProcessService implements ApplicationContextAware {
                             logger.warn("处理请求失败 : {}", uid);
                             return;
                         }
-                        userData = userDataService.load(uid);
+                        userData = userDataService.load(uid, groupId);
                         if (userData == null) {
                             logger.warn("userData is null");
                             return;
@@ -333,21 +329,6 @@ public class ProcessService implements ApplicationContextAware {
         return Math.abs((int) (Long.reverseBytes(uid) % THREAD_NUM));
     }
 
-    public void sendClose() {
-        logger.info("send_close_message : {}", groupId);
-        for (int i = 0; i < taskArray.size(); i++) {
-            taskArray.get(i).add(() -> {
-                ProducerRecord<String, String> record = new ProducerRecord<>(KafkaTopic.SYNC_TO_DB, JSON.toJSONString(Lists.newArrayList(new AsyncMessageItem(AsyncMessageItem.Type.CLOSE.getValue(), Lists.newArrayList(taskArray.size())))));
-                kafkaProducer.send(record, (metadata, exception) -> {
-                    if (exception != null) {
-                        logger.error("send_close_message_error", exception);
-                    } else {
-                        logger.info("send_close_message_success");
-                    }
-                });
-            });
-        }
-    }
 
     @Override
     public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
@@ -419,12 +400,12 @@ public class ProcessService implements ApplicationContextAware {
             return;
         }
         BigDecimal newPrice = tradePrice.getPrice();
-        TradePrice oldPrice = tradePriceMap.get(tradePrice.getMarketId());
+        TradePrice oldPrice = tradePrices.get(tradePrice.getMarketId());
         if (newPrice != null && oldPrice != null && newPrice.compareTo(oldPrice.getPrice()) == 0) {
             return;
         }
-        tradePriceMap.put(tradePrice.getMarketId(), tradePrice);
-        Map<Integer, TradePrice> prices = new HashMap<>(tradePriceMap);
+        tradePrices.put(tradePrice.getMarketId(), tradePrice);
+        Map<Integer, TradePrice> prices = new HashMap<>(tradePrices);
         for (int i = 0; i < taskArray.size(); i++) {
             DataContext dataContext = globalDataContext.get(i);
             int index = i;
@@ -451,7 +432,7 @@ public class ProcessService implements ApplicationContextAware {
                 }
                 for (MarketConfig marketConfig : list) {
                     start = marketConfig.getId();
-                    marketConfigs.put(String.valueOf(marketConfig.getId()), marketConfig);
+                    marketConfigs.put(marketConfig.getId(), marketConfig);
                 }
             } while (true);
         }

@@ -22,7 +22,7 @@ public class PositionProcess extends BaseProcess {
     @MethodAnnotation("getAssetsList")
     public AsyncMessageItems getAssetsList(UserData userData) {
         LinkedList<Position> positions = userData.getPositions();
-        Map<Integer, TradePrice> tradePriceMap = ProcessService.tradePriceMap;
+        Map<Integer, TradePrice> tradePriceMap = ProcessService.tradePrices;
         ArrayList<JSONObject> positionVoList = new ArrayList<>();
         BigDecimal totalUnRealizedAmount = BigDecimal.ZERO;
         for (Position position : positions) {

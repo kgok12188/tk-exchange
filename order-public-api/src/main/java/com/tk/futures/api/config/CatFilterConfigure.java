@@ -1,5 +1,7 @@
 package com.tk.futures.api.config;
 
+import com.dianping.cat.Cat;
+import com.dianping.cat.message.Transaction;
 import com.dianping.cat.servlet.CatFilter;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -16,6 +18,9 @@ public class CatFilterConfigure {
         registration.addUrlPatterns("/*");
         registration.setName("cat-filter");
         registration.setOrder(1);
+        Transaction transaction = Cat.newTransaction("CatFilter", "start");
+        transaction.setStatus(Transaction.SUCCESS);
+        transaction.complete();
         return registration;
     }
 

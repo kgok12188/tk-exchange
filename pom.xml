@@ -54,6 +54,7 @@
         <module>order-trigger</module>
         <module>order-admin-api</module>
         <module>order-test</module>
+        <module>flush-service</module>
     </modules>
 
     <dependencies>

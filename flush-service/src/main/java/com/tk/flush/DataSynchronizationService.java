@@ -1,4 +1,4 @@
-package com.tk.futures.service;
+package com.tk.flush;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
@@ -6,13 +6,15 @@ import com.google.common.collect.Lists;
 import com.tx.common.entity.*;
 import com.tx.common.kafka.KafkaTopic;
 import com.tx.common.message.AsyncMessageItem;
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.DescribeTopicsResult;
+import com.tx.common.service.PersistenceService;
+import com.tx.common.service.WorkerOrderGroupService;
 import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -27,91 +29,85 @@ import java.util.stream.Collectors;
  * 2、只会保留txid 最大的数据
  */
 @Service
-public class DataSynchronizationService {
+public class DataSynchronizationService implements SmartLifecycle {
 
     private static final AtomicInteger threadNumberIndex = new AtomicInteger(0);
 
     private static final Logger logger = LoggerFactory.getLogger(DataSynchronizationService.class);
 
     private final String servers;
-    private String groupId;
 
     private ExecutorService executor;
 
     private volatile boolean start;
 
-    private final UserDataService userDataService;
-
-    private CountDownLatch countDownLatch;
-
     private int consumerThreadNumber;
 
-    public DataSynchronizationService(@Value("${kafka.groupId}") String groupId, @Value("${kafka.servers}") String servers, UserDataService userDataService) {
-        this.userDataService = userDataService;
-        this.groupId = groupId;
+    private static final String consumerGroupId = "flush";
+
+    @Autowired
+    private PersistenceService persistenceService;
+    @Autowired
+    private WorkerOrderGroupService workerOrderGroupService;
+
+    public DataSynchronizationService(@Value("${kafka.servers}") String servers) {
         this.servers = servers;
     }
 
-    public void start(String groupId) throws Exception {
-        logger.info("start_consumer : {}", groupId);
+    public void start() {
+        List<String> topicList = workerOrderGroupService.lambdaQuery().list().stream().map(item -> KafkaTopic.SYNC_TO_DB + item.getGroupName()).collect(Collectors.toList());
+        logger.info("start_consumer : {}", consumerGroupId);
         start = true;
         // 1. 获取主题分区数
-        consumerThreadNumber = getPartitionNumber() / 2;
-        countDownLatch = new CountDownLatch(consumerThreadNumber);
+        consumerThreadNumber = 2;
         // 2. 创建线程池（线程数=分区数）
-        executor = new ThreadPoolExecutor(consumerThreadNumber, consumerThreadNumber, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable r) {
-                return new Thread(r, "consumer-" + groupId + "-" + threadNumberIndex.incrementAndGet());
-            }
-        });
+        executor = new ThreadPoolExecutor(consumerThreadNumber, consumerThreadNumber, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> new Thread(r, consumerGroupId + "-" + threadNumberIndex.incrementAndGet()));
         // 3. 为每个分区创建消费者
         for (int partition = 0; partition < consumerThreadNumber; partition++) {
-            executor.execute(this::createPartitionConsumer);
+            executor.execute(() -> this.createPartitionConsumer(topicList));
         }
-        logger.info("started_consumer : groupId = {},\tpartitionCount = {}", groupId, consumerThreadNumber);
+        logger.info("started_consumer : groupId = {},\tpartitionCount = {}", consumerGroupId, consumerThreadNumber);
     }
 
-    public void stop() throws Exception {
+    public void stop() {
         if (start) {
             start = false;
-            countDownLatch.await();
             if (executor != null) {
                 executor.shutdown();
             }
-            logger.info("stop_sync_to_db_consumer : {},\t{}", groupId, consumerThreadNumber);
+            logger.info("stop_sync_to_db_consumer : {},\t{}", "flush", consumerThreadNumber);
         }
     }
 
-    private int getPartitionNumber() throws Exception {
-        HashMap<String, Object> config = new HashMap<>();
-        config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, servers);
-        try (AdminClient admin = AdminClient.create(config)) {
-            DescribeTopicsResult result = admin.describeTopics(Collections.singleton(KafkaTopic.SYNC_TO_DB));
-            return result.topicNameValues().get(KafkaTopic.SYNC_TO_DB).get().partitions().size();
-        }
+    @Override
+    public boolean isRunning() {
+        return start;
     }
 
-    private void createPartitionConsumer() {
+    private void createPartitionConsumer(List<String> groupList) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, servers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "flush");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            Map<Integer, Long> offsetMap = new ConcurrentHashMap<>();
-            consumer.subscribe(Lists.newArrayList(KafkaTopic.SYNC_TO_DB), new ConsumerRebalanceListener() {
+            HashMap<String, Map<Integer, Long>> topicOffsetPartitions = new HashMap<>();
+            for (String topic : groupList) {
+                topicOffsetPartitions.put(topic, new HashMap<>());
+            }
+            consumer.subscribe(groupList, new ConsumerRebalanceListener() {
                 @Override
                 public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
                     for (TopicPartition partition : partitions) {
+                        Map<Integer, Long> offsetMap = topicOffsetPartitions.get(partition.topic());
                         offsetMap.remove(partition.partition());
                     }
                 }
 
                 @Override
                 public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                    logger.info("onPartitionsAssigned : {},\t{}", KafkaTopic.SYNC_TO_DB, partitions.stream().map(TopicPartition::partition).collect(Collectors.toList()));
+                    logger.info("onPartitionsAssigned : {}", partitions.stream().map(p -> (p.topic() + "-" + p.partition())).collect(Collectors.toList()));
                 }
 
             });
@@ -128,14 +124,18 @@ public class DataSynchronizationService {
                 boolean suc = false;
                 for (ConsumerRecord<String, String> record : records) {
                     try {
+                        Map<Integer, Long> offsetMap = topicOffsetPartitions.get(record.topic());
                         offsetMap.put(record.partition(), record.offset());
                         processRecord(record); // 业务处理
                         suc = true;
                     } catch (Exception e) {
                         logger.error("ConsumerRecords : {}", record.value(), e);
                         suc = false;
-                        for (Map.Entry<Integer, Long> kv : offsetMap.entrySet()) {
-                            consumer.seek(new TopicPartition(KafkaTopic.SYNC_TO_DB, kv.getKey()), kv.getValue());
+                        for (Map.Entry<String, Map<Integer, Long>> topicOffsetPartition : topicOffsetPartitions.entrySet()) {
+                            String topic = topicOffsetPartition.getKey();
+                            for (Map.Entry<Integer, Long> kv : topicOffsetPartition.getValue().entrySet()) {
+                                consumer.seek(new TopicPartition(topic, kv.getKey()), kv.getValue());
+                            }
                         }
                         break;
                     }
@@ -150,8 +150,7 @@ public class DataSynchronizationService {
                     }
                 }
             }
-            countDownLatch.countDown();
-            logger.info("stop_consumer : {}", groupId);
+            logger.info("stop_consumer : {}", consumerGroupId);
         }
     }
 
@@ -218,7 +217,7 @@ public class DataSynchronizationService {
                     break;
                 default:
             }
-            userDataService.persistence(messageItems);
+            persistenceService.flush(messageItems);
         }
     }
 
