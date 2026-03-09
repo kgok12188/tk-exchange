@@ -9,7 +9,7 @@
         <version>1.0</version>
     </parent>
 
-    <artifactId>flush-service</artifactId>
+    <artifactId>open-api</artifactId>
 
     <dependencies>
         <dependency>
@@ -17,16 +17,33 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+        </dependency>
+        <dependency>
             <groupId>tk</groupId>
             <artifactId>tk-common</artifactId>
             <version>1.0</version>
         </dependency>
         <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-boot-starter</artifactId>
+            <version>${mybatis-plus-boot-stater.version}</version>
+        </dependency>
+        <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka_2.13</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.dianping.cat</groupId>
+            <artifactId>cat-client</artifactId>
+            <version>3.1.0</version>
+        </dependency>
     </dependencies>
-
 
     <build>
         <plugins>

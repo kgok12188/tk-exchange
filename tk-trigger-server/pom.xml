@@ -9,7 +9,8 @@
         <version>1.0</version>
     </parent>
 
-    <artifactId>flush-service</artifactId>
+    <artifactId>tk-trigger-server</artifactId>
+
 
     <dependencies>
         <dependency>
@@ -17,16 +18,20 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+        </dependency>
+        <dependency>
             <groupId>tk</groupId>
             <artifactId>tk-common</artifactId>
             <version>1.0</version>
         </dependency>
         <dependency>
-            <groupId>org.apache.kafka</groupId>
-            <artifactId>kafka_2.13</artifactId>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-boot-starter</artifactId>
+            <version>${mybatis-plus-boot-stater.version}</version>
         </dependency>
     </dependencies>
-
 
     <build>
         <plugins>
@@ -66,5 +71,6 @@
         </plugins>
         <finalName>${project.name}</finalName>
     </build>
+
 
 </project>
