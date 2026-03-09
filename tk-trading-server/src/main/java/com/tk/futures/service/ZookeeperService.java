@@ -8,11 +8,6 @@ import com.tx.common.service.WorkerOrderGroupJvmService;
 import com.tx.common.service.WorkerOrderGroupService;
 import lombok.SneakyThrows;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.framework.CuratorFrameworkFactory;
-import org.apache.curator.framework.recipes.leader.LeaderLatch;
-import org.apache.curator.framework.recipes.leader.LeaderLatchListener;
-import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.slf4j.Logger;
@@ -22,14 +17,16 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
-import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Date;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
-import java.util.concurrent.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class ZookeeperService implements SmartLifecycle {
@@ -43,10 +40,6 @@ public class ZookeeperService implements SmartLifecycle {
     private final WorkerOrderGroupService workerOrderGroupService;
 
     private volatile boolean running = false;
-
-    private final String zookeeperUrl;
-
-    private LeaderLatch leaderLatch;
 
     private KafkaProducer<String, String> kafkaProducer;
 
@@ -67,7 +60,6 @@ public class ZookeeperService implements SmartLifecycle {
         this.orderIdGenerator = orderIdGenerator;
         InetAddress addr = InetAddress.getLocalHost();
         jvmId = addr.toString() + ":" + UUID.randomUUID().toString().replaceAll("-", "");
-        this.zookeeperUrl = zookeeperUrl;
         this.workerOrderGroupJvmService = workerOrderGroupJvmService;
         this.processService = processService;
         kafkaProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServers);
@@ -130,11 +122,6 @@ public class ZookeeperService implements SmartLifecycle {
     @Override
     public void start() {
         kafkaProducer = new KafkaProducer<>(kafkaProps);
-        CuratorFramework client = CuratorFrameworkFactory.newClient(
-                zookeeperUrl,
-                new ExponentialBackoffRetry(1000, 3)
-        );
-        client.start();
         running = true;
         final String group = getGroupName();
 
@@ -156,26 +143,14 @@ public class ZookeeperService implements SmartLifecycle {
 
         orderIdGenerator.setSnowflakeIdWorker(workerOrderGroup.getId());
 
-        logger.info("start_group : {},machineId = {}", group, workerOrderGroup.getId());
+        logger.info("start_group : {}, machineId = {}", group, workerOrderGroup.getId());
 
         scheduledExecutorService.scheduleAtFixedRate(() -> {
             removeLostHost();
             workerOrderGroupJvmService.updateLastTime(jvmId);
         }, 120, 120, TimeUnit.SECONDS);
 
-        leaderLatch = new LeaderLatch(client, "/election/order/group-" + group);
-        leaderLatch.addListener(new LeaderLatchListener() {
-            @Override
-            public void isLeader() {
-                processService.toMaster(group, kafkaProducer);
-            }
-
-            @Override
-            public void notLeader() {
-                processService.toSlave(group);
-            }
-        });
-        leaderLatch.start();
+        processService.start(group, kafkaProducer);
     }
 
     @Override
@@ -193,13 +168,6 @@ public class ZookeeperService implements SmartLifecycle {
                 logger.warn("close_kafka", e);
             }
         }
-        logger.info("stopped_kafka, stop leaderLatch");
-        try {
-            leaderLatch.close();
-        } catch (IOException e) {
-            logger.warn("close_leaderLatch", e);
-        }
-        logger.info("stopped_leaderLatch");
         scheduledExecutorService.shutdown();
         workerOrderGroupJvmService.removeJvmId(jvmId);
         running = false;

@@ -1,7 +1,6 @@
 package com.tk.futures.service;
 
 import com.alibaba.fastjson2.JSON;
-import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import com.tk.futures.generator.TxIdGenerator;
 import com.tk.futures.generator.TxIdGeneratorImpl;
@@ -11,16 +10,12 @@ import com.tk.futures.model.MarketCachedMapOptions;
 import com.tk.futures.model.UserData;
 import com.tk.futures.process.BaseProcess;
 import com.tk.futures.process.OrderProcess;
+import com.tk.futures.statemachine.RequestState;
 import com.tx.common.entity.*;
-import com.tx.common.kafka.KafkaTopic;
 import com.tx.common.message.AsyncMessageItem;
 import com.tx.common.service.*;
 import jakarta.annotation.PostConstruct;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.redisson.api.RLocalCachedMap;
 import org.redisson.api.RedissonClient;
@@ -35,7 +30,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -43,6 +37,10 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * 请求处理服务。与 MessageQueueService 配合：仅消费 REQUEST_MESSAGE，按 uid 槽位队列顺序处理。
+ * 注意：ORDER_MATCH、TRADE_PRICE 已不在本服务消费；matchOrder/exceptionOrder/doLiq 保留供其他调用方（如独立消费者或 RPC）使用。
+ */
 @Service
 public class ProcessService implements ApplicationContextAware {
 
@@ -72,9 +70,6 @@ public class ProcessService implements ApplicationContextAware {
     private final AtomicBoolean atomicLoadUserData = new AtomicBoolean(false);
 
     private boolean startProcess = false;
-    private boolean isSlave = true;
-
-    private CountDownLatch consumerMasterCountDownLatch;
 
 
     private void loadUserData(String groupId) {
@@ -111,125 +106,19 @@ public class ProcessService implements ApplicationContextAware {
         this.marketConfigService = marketConfigService;
     }
 
-    public synchronized void toMaster(String groupId, KafkaProducer<String, String> kafkaProducer) {
-        logger.info("toMaster : isSlave = {},\t{}", isSlave, groupId);
-        if (isSlave) {
-            isSlave = false;
-            if (consumerMasterCountDownLatch != null) {
-                try {
-                    consumerMasterCountDownLatch.await();
-                } catch (Exception e) {
-                    logger.info("toMaster : " + groupId, e);
-                }
-            }
-            consumerMasterCountDownLatch = null;
-            this.groupId = groupId;
-            startProcess(groupId, kafkaProducer);
-            loadUserData(groupId);
-            messageQueueService.toMaster(groupId);
-        }
-    }
-
-    public synchronized void toSlave(String groupId) {
-        logger.info("toSlave : {}", groupId);
+    /**
+     * 启动处理服务：加载用户数据并启动 REQUEST_MESSAGE 消费。
+     */
+    public synchronized void start(String groupId, KafkaProducer<String, String> kafkaProducer) {
+        logger.info("start process, groupId={}", groupId);
+        this.groupId = groupId;
         startProcess(groupId, kafkaProducer);
         loadUserData(groupId);
-        messageQueueService.stop(); // 停止异步消息处理
-        isSlave = true;
-        if (consumerMasterCountDownLatch == null) {
-            new Thread(() -> fetchMaster(groupId), "fetch-master").start();
-        }
+        messageQueueService.toMaster(groupId);
     }
 
     /**
-     * 同步master内存数据
-     *
-     * @param groupId 分组名称
-     */
-    private void fetchMaster(String groupId) {
-        consumerMasterCountDownLatch = new CountDownLatch(1);
-        Properties props = new Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, servers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
-        // 处理请求
-        try (KafkaConsumer<String, String> kafkaConsumer = new KafkaConsumer<>(props)) {
-            kafkaConsumer.subscribe(Collections.singletonList(KafkaTopic.SYNC_TO_DB + groupId));
-            ConsumerRecords<String, String> consumerRecords;
-            long lastFreshTime = 0;
-            do {
-                consumerRecords = kafkaConsumer.poll(Duration.ofMillis(200));
-                for (ConsumerRecord<String, String> record : consumerRecords) {
-                    processRecord(record);
-                    lastFreshTime = System.currentTimeMillis();
-                }
-            } while (isSlave || ((System.currentTimeMillis()) - lastFreshTime <= 1500)); // 消费master数据，没有数据 超过1.5秒
-        } finally {
-            consumerMasterCountDownLatch.countDown();
-            consumerMasterCountDownLatch = null;
-        }
-    }
-
-    private void processRecord(ConsumerRecord<String, String> record) {
-        try {
-            JSONArray array = JSON.parseArray(record.value());
-            for (int i = 0; i < array.size(); i++) {
-                try {
-                    Integer type = array.getJSONObject(i).getInteger("type");
-                    AsyncMessageItem.Type t = AsyncMessageItem.Type.fromValue(type);
-                    if (t == null) {
-                        continue;
-                    }
-                    JSONArray messages = array.getJSONObject(i).getJSONArray("messages");
-                    switch (t) { // 0 account 1 transfer 2 order 3 position
-                        case ACCOUNT:
-                            for (int j = 0; j < messages.size(); j++) {
-                                Account account = messages.getJSONObject(j).toJavaObject(Account.class);
-                                Map<Long, UserData> map = globalDataContext.get(userSlot(account.getUid()));
-                                UserData userData = map.get(account.getUid());
-                                userData = userData == null ? userDataService.load(account.getUid(), groupId) : userData;
-                                if (userData != null) {
-                                    userData.mergerAccount(account);
-                                }
-                            }
-                            break;
-                        case ORDER:
-                            for (int j = 0; j < messages.size(); j++) {
-                                Order order = messages.getJSONObject(j).toJavaObject(Order.class);
-                                Map<Long, UserData> map = globalDataContext.get(userSlot(order.getUid()));
-                                UserData userData = map.get(order.getUid());
-                                userData = userData == null ? userDataService.load(order.getUid(), groupId) : userData;
-                                if (userData != null) {
-                                    userData.mergerOrder(order);
-                                }
-                            }
-                            break;
-                        case POSITION:
-                            for (int j = 0; j < messages.size(); j++) {
-                                Position position = messages.getJSONObject(j).toJavaObject(Position.class);
-                                Map<Long, UserData> map = globalDataContext.get(userSlot(position.getUid()));
-                                UserData userData = map.get(position.getUid());
-                                userData = userData == null ? userDataService.load(position.getUid(), groupId) : userData;
-                                if (userData != null) {
-                                    userData.mergerPosition(position);
-                                }
-                            }
-                            break;
-                        default:
-                    }
-                } catch (Exception e) {
-                    logger.warn("数据解析错误_0 : {},\t{}", record.value(), i);
-                }
-            }
-        } catch (Exception e) {
-            logger.warn("数据解析错误_1 ： {}", record.value());
-        }
-    }
-
-    /**
-     * 开启本地线程
+     * 开启本地工作线程与按 uid 槽位队列
      *
      * @param groupId       分组id
      * @param kafkaProducer kakfa
@@ -274,6 +163,10 @@ public class ProcessService implements ApplicationContextAware {
         logger.info("stopped");
     }
 
+    /**
+     * 状态机处理：仅处理 REQUEST_MESSAGE 请求，按 uid 落入槽位队列，同一 uid 顺序执行。
+     * 状态流转：RECEIVED(在 MQ 消费处) -> QUEUED -> PROCESSING -> COMPLETED | FAILED
+     */
     public void run(JSONObject request) {
         String methodName = request.getString("method");
         Long uid = request.getLong("uid");
@@ -286,6 +179,9 @@ public class ProcessService implements ApplicationContextAware {
         try {
             int userSlot = userSlot(uid);
             taskArray.get(userSlot).add(() -> {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("request {} -> {}, reqId={}, uid={}", RequestState.QUEUED, RequestState.PROCESSING, reqId, uid);
+                }
                 try {
                     DataContext dataContext = globalDataContext.get(userSlot);
                     TxIdGenerator txIdGenerator = txIdGeneratorMap.get(userSlot);
@@ -312,7 +208,13 @@ public class ProcessService implements ApplicationContextAware {
                         ret = (AsyncMessageItems) execMethod.getMethod().invoke(execMethod.getProcess(), userData);
                     }
                     userDataService.sendToMq(kafkaProducer, uid, ret);
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("request {}, reqId={}, uid={}", RequestState.COMPLETED, reqId, uid);
+                    }
                 } catch (Exception e) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("request {}, reqId={}, uid={}", RequestState.FAILED, reqId, uid);
+                    }
                     logger.error("run_command error", e);
                 } finally {
                     BaseProcess.removeDataContext();

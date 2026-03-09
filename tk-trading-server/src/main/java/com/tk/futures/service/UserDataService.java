@@ -59,7 +59,7 @@ public class UserDataService {
         if (CollectionUtils.isEmpty(messageItems)) {
             return;
         }
-        ProducerRecord<String, String> record = new ProducerRecord<>(KafkaTopic.SYNC_TO_DB + groupId, String.valueOf(uid), JSON.toJSONString(messageItems));
+        ProducerRecord<String, String> record = new ProducerRecord<>(KafkaTopic.TRADING_RESULT + groupId, String.valueOf(uid), JSON.toJSONString(messageItems));
         try {
             kafkaProducer.send(record);
         } catch (Exception e) {

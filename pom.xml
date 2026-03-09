@@ -47,6 +47,7 @@
         <module>tk-trigger-server</module>
         <module>admin-api</module>
         <module>flush-service</module>
+        <module>message-dispatch</module>
     </modules>
 
     <dependencies>

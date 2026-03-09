@@ -2,7 +2,7 @@ package com.tx.common.kafka;
 
 public class KafkaTopic {
 
-    public static final String SYNC_TO_DB = "syncToDb";
+    public static final String TRADING_RESULT = "trading-result-";
     public static final String REQUEST_MESSAGE = "requestMessage"; // 实际topic 是 requestMessage + 分组名称
     public static final String RESPONSE_MESSAGE = "responseMessage"; // order-service 发送的响应消息
 

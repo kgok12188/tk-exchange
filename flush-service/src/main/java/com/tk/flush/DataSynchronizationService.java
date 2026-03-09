@@ -58,7 +58,7 @@ public class DataSynchronizationService implements SmartLifecycle {
     }
 
     public void start() {
-        List<String> topicList = workerOrderGroupService.lambdaQuery().list().stream().map(item -> KafkaTopic.SYNC_TO_DB + item.getGroupName()).collect(Collectors.toList());
+        List<String> topicList = workerOrderGroupService.lambdaQuery().list().stream().map(item -> KafkaTopic.TRADING_RESULT + item.getGroupName()).collect(Collectors.toList());
         logger.info("start_consumer : {}", consumerGroupId);
         start = true;
         // 1. 获取主题分区数
