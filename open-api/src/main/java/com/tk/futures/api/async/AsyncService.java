@@ -65,7 +65,7 @@ public class AsyncService implements SmartLifecycle {
         deferredResult.onTimeout(() -> deferredResults.remove(kafkaRequest.getReqId()));
         String group = userService.getById(kafkaRequest.getUid()).getGroupName();
         deferredResults.put(kafkaRequest.getReqId(), deferredResult);
-        kafkaProducer.send(new ProducerRecord<>(KafkaTopic.REQUEST_MESSAGE + group, String.valueOf(kafkaRequest.getUid()), JSONObject.toJSONString(kafkaRequest)));
+        kafkaProducer.send(new ProducerRecord<>(KafkaTopic.TRADING_MESSAGE + group, String.valueOf(kafkaRequest.getUid()), JSONObject.toJSONString(kafkaRequest)));
         return deferredResult;
     }
 

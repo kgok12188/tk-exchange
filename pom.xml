@@ -39,6 +39,7 @@
     </dependencyManagement>
 
     <modules>
+        <module>trading-protocol</module>
         <module>tk-common</module>
         <module>tk-trading-server</module>
         <module>match-engine</module>

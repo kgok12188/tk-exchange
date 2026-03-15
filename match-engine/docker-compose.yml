@@ -1,0 +1,31 @@
+# Kafka、Zookeeper 已部署在 network=exchange，本 compose 仅启动 match-engine 并接入该网络
+# 需先创建网络: docker network create exchange
+#
+# 构建镜像（无需 .env）: docker compose build  或  ./compose.sh build
+# 启动容器时请在 .env 中指定 MATCH_ENGINE_HOST_PORT、MATCH_ENGINE_SNAPSHOT_DIR、MATCH_ENGINE_QUEUE_DIR；
+# 未设置时使用下方默认值（仅保证 compose 解析通过，生产请务必在 .env 中指定）。
+# 镜像 tag: MATCH_ENGINE_TAG，不填则 local；可用 ./compose.sh 自动设为当前时间。
+#
+# 重要：必须在本目录执行 docker compose up，容器才会加入 exchange 网络。
+
+services:
+  match-engine:
+    image: match-engine:${MATCH_ENGINE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: match-engine/Dockerfile
+    container_name: match-engine
+    ports:
+      - "${MATCH_ENGINE_HOST_PORT:-8092}:8092"
+    environment:
+      KAFKA_SERVERS: ${KAFKA_SERVERS:-kafka:9092}
+      MATCH_ZOOKEEPER_SERVERS: ${MATCH_ZOOKEEPER_SERVERS:-zookeeper:2181}
+    volumes:
+      - "${MATCH_ENGINE_SNAPSHOT_DIR:-/tmp/match-engine-snapshot}:/tmp/match-engine-snapshot"
+      - "${MATCH_ENGINE_QUEUE_DIR:-/tmp/match-engine-queue}:/tmp/match-engine"
+    restart: unless-stopped
+
+networks:
+  default:
+    name: exchange
+    external: true

@@ -1,0 +1,11 @@
+  /Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home/bin/java \
+--illegal-access=permit \
+--add-opens=java.base/java.lang.reflect=ALL-UNNAMED \
+--add-opens=java.base/java.lang=ALL-UNNAMED \
+--add-opens=java.base/java.io=ALL-UNNAMED \
+--add-opens=java.base/java.util=ALL-UNNAMED \
+--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED \
+--add-exports=java.base/jdk.internal.util=ALL-UNNAMED \
+--add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
+--add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED \
+-jar /Users/tyler/Documents/coin/tk-exchange/match-engine/target/match-engine.jar

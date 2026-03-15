@@ -2,7 +2,7 @@ package com.tk.futures.service;
 
 import com.alibaba.fastjson2.JSON;
 import com.google.common.collect.Lists;
-import com.tk.futures.model.UserData;
+import com.tk.futures.model.UserTradingBook;
 import com.tx.common.entity.*;
 import com.tx.common.kafka.KafkaTopic;
 import com.tx.common.message.AsyncMessageItem;
@@ -33,11 +33,12 @@ public class UserDataService {
     @Autowired
     private PersistenceService persistenceService;
 
-    private String groupId;
+    /** 当前分组名称（用于 TRADING_RESULT topic 后缀） */
+    private String groupName;
 
-    public UserData load(Long uid, String groupId) {
-        if (this.groupId == null) {
-            this.groupId = groupId;
+    public UserTradingBook load(Long uid, String groupName) {
+        if (this.groupName == null) {
+            this.groupName = groupName;
         }
         if (uid == null) {
             return null;
@@ -52,14 +53,14 @@ public class UserDataService {
         List<Position> positions = positionService.lambdaQuery().eq(Position::getUid, uid).eq(Position::getStatus, 1).list();
         // 资产信息
         List<Account> accounts = accountService.lambdaQuery().eq(Account::getUid, uid).list();
-        return new UserData(uid, new LinkedList<>(orders), new LinkedList<>(positions), new LinkedList<>(accounts));
+        return new UserTradingBook(uid, new LinkedList<>(orders), new LinkedList<>(positions), new LinkedList<>(accounts));
     }
 
     public void sendToMq(KafkaProducer<String, String> kafkaProducer, long uid, List<AsyncMessageItem> messageItems) {
         if (CollectionUtils.isEmpty(messageItems)) {
             return;
         }
-        ProducerRecord<String, String> record = new ProducerRecord<>(KafkaTopic.TRADING_RESULT + groupId, String.valueOf(uid), JSON.toJSONString(messageItems));
+        ProducerRecord<String, String> record = new ProducerRecord<>(KafkaTopic.TRADING_RESULT + groupName, String.valueOf(uid), JSON.toJSONString(messageItems));
         try {
             kafkaProducer.send(record);
         } catch (Exception e) {
