@@ -4,6 +4,7 @@ import com.tk.match.config.MatchEngineConfig;
 import com.tk.match.service.MatchManager;
 import lombok.Setter;
 import net.openhft.chronicle.queue.ExcerptAppender;
+import net.openhft.chronicle.queue.RollCycles;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.wire.DocumentContext;
@@ -58,6 +59,9 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
     @Autowired
     @Setter
     private MatchEngineConfig matchEngineConfig;
+    @Autowired
+    @Setter
+    private DelayedFileDeletionService delayedFileDeletionService;
 
     /**
      * 专用锁：用于 assign 为空时的 wait，以及 addSymbol 的 notifyAll，避免使用 this 导致 IllegalMonitorStateException
@@ -323,7 +327,7 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
         if (orderReqOffset <= lastWrite.getOrderReqOffset()) return;
 
         try {
-            SingleChronicleQueue queue = consumedQueuesBySymbol.computeIfAbsent(symbol, this::createConsumedQueue);
+            SingleChronicleQueue queue = consumedQueuesBySymbol.computeIfAbsent(symbol, this::createMasterQueue);
             ExcerptAppender appender = queue.acquireAppender();
             try (DocumentContext doc = appender.writingDocument()) {
                 Objects.requireNonNull(doc.wire()).write().int64(orderReqOffset).write().text(payload);
@@ -334,13 +338,14 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
         }
     }
 
-    private SingleChronicleQueue createConsumedQueue(String symbol) {
+    private SingleChronicleQueue createMasterQueue(String symbol) {
         try {
             Path base = getMasterConsumedBaseDir();
             if (base == null) throw new IllegalStateException("masterConsumedBaseDir not set");
             Path dir = base.resolve(symbol);
             Files.createDirectories(dir);
-            return SingleChronicleQueueBuilder.binary(dir).epoch(System.currentTimeMillis()).build();
+            return SingleChronicleQueueBuilder.binary(dir).epoch(System.currentTimeMillis()).rollCycle(RollCycles.TEN_MINUTELY)
+                    .storeFileListener(delayedFileDeletionService::scheduleDeletion).build();
         } catch (IOException e) {
             throw new RuntimeException("Failed to create consumed file queue for symbol " + symbol, e);
         }

@@ -1,13 +1,18 @@
 ---
-description: Kafka 按币对 topic 的分区约定，避免考虑多分区
+description: Kafka 按币对/分片 topic 的分区约定，避免混淆多分区场景
 globs: 
   - "**/*.java"
   - "**/doc/**"
   - "**/openspec/**"
 ---
 
-# Kafka 按币对 Topic：单分区约定
+# Kafka Topic 分区约定
 
-- **`match_result_(币对)`** 与 **`order_req_(币对)`** 每个 topic **仅一个分区**（partition 0）。
-- 设计上按币对严格顺序处理，不依赖多分区；实现时只使用 **partition 0**，无需考虑多分区、rebalance 或按分区聚合。
-- 命名示例：`match_result_BTC-USDT`、`order_req_BTC-USDT`（币对格式与项目一致，如连字符或下划线）。
+## 单分区 Topic（实现时仅用 partition 0，不考虑多分区/rebalance）
+
+- **`match_result_(币对)`**、**`order_req_(币对)`**：每个 topic **仅一个分区**（partition 0）。按币对严格顺序处理。
+- **`trading_(分片)`**：每个 topic **仅一个分区**（partition 0）。分片表示一组用户，不同分片之间用户隔离；同一分片内单流顺序消费。
+
+## 多分区 Topic（分片内并行）
+
+- **`trading_result_(分片)`** 与 **`trading_(分片)` 一一对应**（一个分片一条输入流、一条输出流），但 **trading_result_(分片) 可有多个 Kafka partition**：表示分片内再次按用户分组，分配到不同 ringBuffer 并行处理（槽位 i → partition i）。

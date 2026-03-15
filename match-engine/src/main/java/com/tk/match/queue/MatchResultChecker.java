@@ -28,15 +28,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * 仅当 match.consistencyCheckEnabled=true、match.fileQueueDir 非空且当前为从节点时执行。
  */
 @Component
-public class StateMachineCheckTask {
+public class MatchResultChecker {
 
-    private static final Logger log = LoggerFactory.getLogger(StateMachineCheckTask.class);
+    private static final Logger log = LoggerFactory.getLogger(MatchResultChecker.class);
 
     private final MatchManager matchManager;
     private final MatchEngineConfig matchEngineConfig;
     private final ConcurrentHashMap<Path, SingleChronicleQueue> queueCache = new ConcurrentHashMap<>();
 
-    public StateMachineCheckTask(MatchManager matchManager, MatchEngineConfig matchEngineConfig) {
+    public MatchResultChecker(MatchManager matchManager, MatchEngineConfig matchEngineConfig) {
         this.matchManager = matchManager;
         this.matchEngineConfig = matchEngineConfig;
     }

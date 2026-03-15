@@ -50,6 +50,24 @@ public class MatchEngineConfig {
     private String fileQueueDir = "/tmp/match-engine/";
 
     /**
+     * 从节点 slave 文件队列保留：超过该小时数未写入的 symbol 目录将被清理（0 表示不按空闲清理）。
+     */
+    @Setter
+    private long fileQueueSlaveRetentionIdleHours = 0L;
+
+    /**
+     * 从节点 slave 单 symbol 队列目录最大字节数，超过则清理该 symbol 队列（下次写入会新建；0 表示不按大小清理）。
+     */
+    @Setter
+    private long fileQueueSlaveMaxBytesPerSymbol = 0L;
+
+    /**
+     * 从节点 slave 文件队列保留清理定时任务间隔（毫秒）。默认 3600000（1 小时）。
+     */
+    @Setter
+    private long fileQueueRetentionIntervalMs = 3600000L;
+
+    /**
      * Zookeeper 连接串（如 127.0.0.1:2181）；为空或未配置时不启用主从选举，本节点不参与选主。
      */
     @Setter

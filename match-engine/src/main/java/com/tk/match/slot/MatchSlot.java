@@ -1,9 +1,14 @@
 package com.tk.match.slot;
 
+import com.lmax.disruptor.BlockingWaitStrategy;
+import com.lmax.disruptor.RingBuffer;
+import com.lmax.disruptor.dsl.Disruptor;
+import com.lmax.disruptor.dsl.ProducerType;
 import com.tk.match.engine.BookOrder;
 import com.tk.match.engine.MatchEngine;
 import com.tk.match.engine.OrderBook;
 import com.tk.match.engine.OrderCommandEnvelope;
+import com.tk.match.queue.DelayedFileDeletionService;
 import com.tk.match.queue.LastWrite;
 import com.tk.match.queue.MatchResultSlaveFileQueue;
 import com.tk.match.service.MatchResultTailQueryService;
@@ -36,7 +41,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * One slot in the match-engine: owns Kafka consumer for its order_req topics, queue, and worker thread.
+ * One slot in the match-engine: owns Kafka consumer for its order_req topics, Disruptor RingBuffer (BlockingWaitStrategy), and handler thread.
  * Same symbol always in same slot (hash(symbol)%N); each symbol has its own MatchEngine (order book).
  * Supports pendingSlotEvents (ADD_SYMBOL / BECAME_MASTER), snapshot request enqueue, and startup restore from snapshot.
  */
@@ -44,40 +49,49 @@ public class MatchSlot {
 
     private static final Logger log = LoggerFactory.getLogger(MatchSlot.class);
     private static final String ORDER_REQ_PREFIX = "order_req_";
+    private static final int RING_BUFFER_SIZE = 65536;
 
     private final int index;
-    private final BlockingQueue<SlotTask> queue;
     private final KafkaProducer<String, String> producer;
     private final List<String> symbols;
     private final String bootstrapServers;
     private final Path snapshotDir;
     private final MatchResultSlaveFileQueue fileQueueWriter;
     private final MatchResultTailQueryService tailQueryService;
+    private final DelayedFileDeletionService delayedFileDeletionService;
     private final ConcurrentMap<String, MatchEngine> enginesBySymbol;
     private final AtomicBoolean running;
     private final ConcurrentLinkedQueue<SlotEvent> pendingSlotEvents;
     private KafkaConsumer<String, String> consumer;
     private Thread consumerThread;
-    private Thread workerThread;
+    private Disruptor<SlotTaskEvent> disruptor;
+    private RingBuffer<SlotTaskEvent> ringBuffer;
+    /**
+     * One-shot latch: countDown when START event has been processed and consumerThread is started.
+     */
+    private volatile CountDownLatch startLatch;
 
     private volatile boolean isMaster = false;
 
     private final Object waitSymbolLock = new Object();
 
     /**
-     * @param symbols          本 slot 负责的币对列表（已归一化，如 BTC_USDT）；内部由 symbol 推导 order_req_(symbol) 作为消费 topic
-     * @param fileQueueDir     从节点文件队列根目录；非空时从节点将 MatchResponse 写入该目录下每币一个 Chronicle Queue，null 表示不写文件队列
-     * @param tailQueryService 查询 match_result_ 尾部的 Service，切主补发前按需查询 masterOffset
+     * @param symbols                    本 slot 负责的币对列表（已归一化，如 BTC_USDT）；内部由 symbol 推导 order_req_(symbol) 作为消费 topic
+     * @param fileQueueDir               从节点文件队列根目录；非空时从节点将 MatchResponse 写入该目录下每币一个 Chronicle Queue，null 表示不写文件队列
+     * @param tailQueryService           查询 match_result_ 尾部的 Service，切主补发前按需查询 masterOffset
+     * @param delayedFileDeletionService 可选；非空时 StoreFileListener 释放文件后延迟 30 分钟删除
      */
-    public MatchSlot(int index, KafkaProducer<String, String> producer, List<String> symbols, String bootstrapServers, Path snapshotDir, Path fileQueueDir, MatchResultTailQueryService tailQueryService) {
+    public MatchSlot(int index, KafkaProducer<String, String> producer, List<String> symbols, String bootstrapServers, Path snapshotDir,
+                     Path fileQueueDir, MatchResultTailQueryService tailQueryService,
+                     DelayedFileDeletionService delayedFileDeletionService) {
         this.index = index;
-        this.queue = new ArrayBlockingQueue<>(65536);
         this.producer = producer;
         this.symbols = symbols != null ? new ArrayList<>(symbols) : new ArrayList<>();
         this.bootstrapServers = bootstrapServers;
         this.snapshotDir = snapshotDir;
-        this.fileQueueWriter = fileQueueDir != null ? new MatchResultSlaveFileQueue(fileQueueDir) : null;
+        this.fileQueueWriter = fileQueueDir != null ? new MatchResultSlaveFileQueue(fileQueueDir, delayedFileDeletionService) : null;
         this.tailQueryService = tailQueryService;
+        this.delayedFileDeletionService = delayedFileDeletionService;
         this.enginesBySymbol = new ConcurrentHashMap<>();
         this.running = new AtomicBoolean(false);
         this.pendingSlotEvents = new ConcurrentLinkedQueue<>();
@@ -130,8 +144,9 @@ public class MatchSlot {
 
     public void submitTakeSnapshot(String symbol) {
         if (symbol == null || snapshotDir == null) return;
-        if (!queue.offer(SlotTask.snapshot(symbol))) {
-            log.warn("MatchSlot snapshot request queue full symbol={} slot={}", symbol, index);
+        pendingSlotEvents.add(SlotEvent.snapshot(symbol));
+        synchronized (waitSymbolLock) {
+            waitSymbolLock.notifyAll();
         }
     }
 
@@ -169,13 +184,29 @@ public class MatchSlot {
                 log.info("MatchSlot index={} symbol={} seek to beginning (offset 0)", index, symbol);
             }
         }
-        consumerThread = new Thread(this::consumeLoop, "mt-consumer-" + index);
-        consumerThread.setDaemon(true);
-        consumerThread.start();
-        workerThread = new Thread(this::runLoop, "match-slot-" + index);
-        workerThread.setDaemon(true);
-        workerThread.start();
-        log.info("MatchSlot started index={} symbols={} engines={}", index, symbols.size(), enginesBySymbol.size());
+        disruptor = new Disruptor<>(
+                new SlotTaskEventFactory(),
+                RING_BUFFER_SIZE,
+                r -> new Thread(r, "match-slot-" + index),
+                ProducerType.SINGLE,
+                new BlockingWaitStrategy());
+        disruptor.handleEventsWith((event, sequence, endOfBatch) -> dispatchSlotTaskEvent(event));
+        disruptor.start();
+        ringBuffer = disruptor.getRingBuffer();
+        startLatch = new CountDownLatch(1);
+        long seq = ringBuffer.next();
+        try {
+            ringBuffer.get(seq).setStart();
+        } finally {
+            ringBuffer.publish(seq);
+        }
+        try {
+            startLatch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("MatchSlot start interrupted", e);
+        }
+        log.info("MatchSlot started index={} symbols={} engines={} disruptor=BlockingWaitStrategy", index, symbols.size(), enginesBySymbol.size());
     }
 
     private static OrderBook getOrderBook(MatchEngine engine, SnapshotLoadResult loaded) {
@@ -205,9 +236,10 @@ public class MatchSlot {
                 consumer.close();
                 consumer = null;
             }
-            if (workerThread != null) {
-                workerThread.interrupt();
-                workerThread = null;
+            if (disruptor != null) {
+                disruptor.shutdown();
+                disruptor = null;
+                ringBuffer = null;
             }
             if (fileQueueWriter != null) {
                 fileQueueWriter.close();
@@ -230,10 +262,13 @@ public class MatchSlot {
                 for (ConsumerRecord<String, String> record : records) {
                     String topic = record.topic();
                     String symbol = topic.startsWith(ORDER_REQ_PREFIX) ? topic.substring(ORDER_REQ_PREFIX.length()) : topic;
-                    OrderCommandEnvelope envelope = new OrderCommandEnvelope(symbol, record.value(), record.offset());
-                    while (!queue.offer(SlotTask.order(envelope), 1, TimeUnit.SECONDS)) {
-                        log.warn("MatchSlot queue full symbol={} slot={}, retrying", symbol, index);
+                    long seq = ringBuffer.next();
+                    try {
+                        ringBuffer.get(seq).setOrder(symbol, record.value(), record.offset());
+                    } finally {
+                        ringBuffer.publish(seq);
                     }
+
                 }
             } catch (org.apache.kafka.common.errors.WakeupException e) {
                 break;
@@ -245,6 +280,25 @@ public class MatchSlot {
                     log.warn("MatchSlot consumer error slotIndex={}", index, e);
                 }
             }
+        }
+    }
+
+    /**
+     * 单生产者：仅 consumeLoop 线程调用，将事件写入 Disruptor。
+     */
+    private void publishToRingBuffer(SlotTaskEvent.Type type, String symbol, HaEvent haEvent) {
+        if (ringBuffer == null) return;
+        long seq = ringBuffer.next();
+        try {
+            SlotTaskEvent ev = ringBuffer.get(seq);
+            switch (type) {
+                case SNAPSHOT -> ev.setSnapshot(symbol);
+                case HA -> ev.setHa(haEvent);
+                default -> {
+                }
+            }
+        } finally {
+            ringBuffer.publish(seq);
         }
     }
 
@@ -264,9 +318,9 @@ public class MatchSlot {
                     topicsToAdd.add(symbolToTopic(symbol));
                 }
             } else if (e instanceof HaEvent ha) {
-                while (!queue.offer(SlotTask.haEvent(ha), 10, TimeUnit.SECONDS)) {
-                    log.info("MatchSlot add haEvent : {} error", ha);
-                }
+                publishToRingBuffer(SlotTaskEvent.Type.HA, null, ha);
+            } else if (e instanceof SnapshotEvent snapEv) {
+                publishToRingBuffer(SlotTaskEvent.Type.SNAPSHOT, snapEv.getSymbol(), null);
             }
         }
         if (!topicsToAdd.isEmpty()) {
@@ -319,28 +373,41 @@ public class MatchSlot {
         return new KafkaConsumer<>(props);
     }
 
-    private void runLoop() {
-        while (running.get()) {
-            try {
-                SlotTask task = queue.take();
-                if (task instanceof OrderCommandTask) {
-                    process(((OrderCommandTask) task).envelope());
-                } else if (task instanceof SnapshotTask) {
-                    takeSnapshot(((SnapshotTask) task).symbol());
-                } else if (task instanceof HaTask haTask) {
-                    if (haTask.haEvent == HaEvent.MASTER) {
+    /**
+     * Disruptor EventHandler: dispatch ORDER / SNAPSHOT / HA from SlotTaskEvent.
+     */
+    private void dispatchSlotTaskEvent(SlotTaskEvent event) {
+        try {
+            switch (event.getType()) {
+                case ORDER ->
+                        process(new OrderCommandEnvelope(event.getSymbol(), event.getRawJson(), event.getOrderReqOffset()));
+                case SNAPSHOT -> takeSnapshot(event.getSymbol());
+                case HA -> {
+                    if (event.getHaEvent() == HaEvent.MASTER) {
                         replayFromFileQueue();
                         isMaster = true;
                     } else {
                         isMaster = false;
                     }
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception e) {
-                log.warn("MatchSlot worker error slotIndex={}", index, e);
+                case START -> {
+                    try {
+                        consumerThread = new Thread(this::consumeLoop, "order-consumer-" + index);
+                        consumerThread.setDaemon(true);
+                        consumerThread.start();
+                    } finally {
+                        CountDownLatch latch = startLatch;
+                        if (latch != null) {
+                            latch.countDown();
+                            startLatch = null;
+                        }
+                    }
+                }
+                default -> {
+                }
             }
+        } catch (Exception e) {
+            log.warn("MatchSlot disruptor handler error slotIndex={} type={}", index, event.getType(), e);
         }
     }
 

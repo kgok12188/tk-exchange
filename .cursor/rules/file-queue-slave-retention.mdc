@@ -1,0 +1,38 @@
+---
+description: 从节点撮合结果文件队列长时间运行如何清理
+globs: 
+  - "**/match-engine/**"
+  - "**/doc/**"
+---
+
+# 从节点撮合结果文件队列：长时间运行如何清理
+
+## 背景
+
+- 从节点将自身产出的 MatchResponse 写入 **baseDir/slave/&lt;symbol&gt;**（Chronicle Queue，每币一个目录）。
+- 长时间从节点不切主时，该目录会持续增长，需通过保留策略或外部手段做清理。
+
+## 已实现的清理方式（配置即生效）
+
+项目内已提供 **FileQueueRetentionTask** 定时任务，仅当**当前为从节点**且 **fileQueueDir 非空** 时按配置执行：
+
+| 配置项 | 含义 | 默认 | 说明 |
+|--------|------|------|------|
+| `match.file-queue-slave-retention-idle-hours` | 按空闲时长清理 | 0（不启用） | 某 symbol 超过该小时数**未再写入**时，清理该 symbol 的 slave 目录（适合冷币对） |
+| `match.file-queue-slave-max-bytes-per-symbol` | 按单 symbol 目录大小清理 | 0（不启用） | 某 symbol 的 slave 目录占用超过该字节数时，清理该 symbol（下次写入会新建；会丢弃未补发的历史数据） |
+| `match.file-queue-retention-interval-ms` | 清理任务执行间隔 | 3600000（1 小时） | 定时任务两次执行之间的间隔 |
+| `match.file-queue-retention-initial-delay-ms` | 首次执行延迟 | 60000（1 分钟） | 应用启动后多久执行第一次清理 |
+
+**使用建议**：
+
+- 只关心**冷 symbol 不占盘**：设 `file-queue-slave-retention-idle-hours`（如 24 或 72）。
+- 要**严格限制单 symbol 占用**：设 `file-queue-slave-max-bytes-per-symbol`（如 500L * 1024 * 1024）；注意清理后该 symbol 在晋升主前的未补发数据会丢失，需评估主从切换频率与可接受性。
+
+## 其他可选手段（不写代码时的认知）
+
+- **外部 cron**：对 `baseDir/slave` 下按文件修改时间或总大小做删除/归档（需注意进程正在写的目录不要强删，或只在从节点且确认无写时操作）。
+- **晋升主时**：切主后本进程会对各 symbol 执行 replay + clear，slave 目录会在补发后被清空，无需额外配置。
+
+## 规则约定
+
+- 问到「从节点文件队列如何清理」时：以本文为准，**不为此改代码**；若需改策略或新增配置，再单独提需求或走 OpenSpec 变更。

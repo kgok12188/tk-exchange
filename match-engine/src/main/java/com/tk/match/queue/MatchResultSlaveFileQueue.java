@@ -1,7 +1,9 @@
 package com.tk.match.queue;
 
+import lombok.NonNull;
 import net.openhft.chronicle.queue.ExcerptAppender;
 import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.RollCycles;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueue;
 import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
 import net.openhft.chronicle.wire.DocumentContext;
@@ -33,9 +35,12 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
      */
     private final ConcurrentHashMap<String, LastWrite> lastWriteBySymbol = new ConcurrentHashMap<>();
     private volatile boolean closed;
+    private final DelayedFileDeletionService delayedFileDeletionService;
 
-    public MatchResultSlaveFileQueue(Path baseDir) {
+
+    public MatchResultSlaveFileQueue(Path baseDir, @NonNull DelayedFileDeletionService delayedFileDeletionService) {
         this.baseDir = baseDir;
+        this.delayedFileDeletionService = delayedFileDeletionService;
     }
 
     /**
@@ -44,7 +49,7 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
     public void write(String symbol, long orderReqOffset, String payload) {
         if (symbol == null || payload == null || closed) return;
         try {
-            SingleChronicleQueue queue = queuesBySymbol.computeIfAbsent(symbol, this::createQueue);
+            SingleChronicleQueue queue = queuesBySymbol.computeIfAbsent(symbol, this::createSlaveQueue);
             ExcerptAppender appender = queue.acquireAppender();
             writeRecord(appender, orderReqOffset, payload);
             long lastIndex = appender.lastIndexAppended();
@@ -61,11 +66,12 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
         return symbol == null ? null : lastWriteBySymbol.get(symbol);
     }
 
-    private SingleChronicleQueue createQueue(String symbol) {
+    private SingleChronicleQueue createSlaveQueue(String symbol) {
         try {
             Path dir = baseDir.resolve("slave").resolve(symbol);
             Files.createDirectories(dir);
-            return SingleChronicleQueueBuilder.binary(dir).epoch(System.currentTimeMillis()).build();
+            return SingleChronicleQueueBuilder.binary(dir).epoch(System.currentTimeMillis()).rollCycle(RollCycles.TEN_MINUTELY)
+                    .storeFileListener(delayedFileDeletionService::scheduleDeletion).build();
         } catch (IOException e) {
             throw new RuntimeException("Failed to create file queue for symbol " + symbol, e);
         }

@@ -1,6 +1,7 @@
 package com.tk.match.service;
 
 import com.tk.match.config.MatchEngineConfig;
+import com.tk.match.queue.DelayedFileDeletionService;
 import com.tk.match.queue.LastWrite;
 import com.tk.match.queue.MatchResultMasterFileQueue;
 import com.tk.match.slot.MatchSlot;
@@ -46,6 +47,8 @@ public class MatchManager {
     private MatchResultMasterFileQueue matchResultMasterFileQueue;
     @Autowired
     private MatchResultTailQueryService matchResultTailQueryService;
+    @Autowired
+    private DelayedFileDeletionService delayedFileDeletionService;
 
     private final String snapshotDir;
     private final String fileQueueDir;
@@ -94,7 +97,8 @@ public class MatchManager {
                 bootstrapServers,
                 snapshotPath,
                 fileQueuePath,
-                matchResultTailQueryService);
+                matchResultTailQueryService,
+                delayedFileDeletionService);
     }
 
     public int getSlotCount() {
