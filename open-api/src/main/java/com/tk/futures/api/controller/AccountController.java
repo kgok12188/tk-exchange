@@ -2,8 +2,8 @@ package com.tk.futures.api.controller;
 
 import com.alibaba.fastjson2.JSONObject;
 import com.tk.futures.api.async.AsyncService;
+import com.tk.protocol.dto.TradingRequest;
 import com.tx.common.entity.Transfer;
-import com.tx.common.message.request.KafkaRequest;
 import com.tx.common.service.TransferService;
 import com.tx.common.vo.R;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -59,9 +59,11 @@ public class AccountController {
             return deferredResult;
         }
         transferService.save(transfer);
-        KafkaRequest request = new KafkaRequest("transfer", transfer, uid);
-        request.setMethod("transfer");
-        request.setUid(uid);
+        TradingRequest request = TradingRequest.builder()
+                .command("TRANSFER")
+                .uid(uid)
+                .data(transfer)
+                .build();
         return asyncService.send(request);
     }
 

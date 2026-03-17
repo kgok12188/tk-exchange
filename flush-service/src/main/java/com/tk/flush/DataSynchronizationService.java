@@ -236,11 +236,7 @@ public class DataSynchronizationService implements SmartLifecycle {
                         appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(Order.class));
                     }
                     break;
-                case POSITION:
-                    for (int j = 0; j < messages.size(); j++) {
-                        appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(Position.class));
-                    }
-                    break;
+                // 现货模式下不再处理 POSITION 类型的批次；如收到则忽略。
                 case TRADE_ORDER:
                     for (int j = 0; j < messages.size(); j++) {
                         appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(TradeOrder.class));

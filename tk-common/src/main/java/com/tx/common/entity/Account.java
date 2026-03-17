@@ -28,4 +28,23 @@ public class Account {
     private Long txid = 0L; // 版本号
     private java.util.Date ctime;
     private java.util.Date mtime;
+
+    /**
+     * 创建一个字段逐一复制的副本。
+     */
+    public Account clone() {
+        Account copy = new Account();
+        copy.setId(this.id);
+        copy.setUid(this.uid);
+        copy.setCoinName(this.coinName);
+        copy.setCoinId(this.coinId);
+        copy.setAvailableBalance(this.availableBalance);
+        copy.setCrossMarginFrozen(this.crossMarginFrozen);
+        copy.setIsolatedMarginFrozen(this.isolatedMarginFrozen);
+        copy.setOrderFrozen(this.orderFrozen);
+        copy.setTxid(this.txid);
+        copy.setCtime(this.ctime);
+        copy.setMtime(this.mtime);
+        return copy;
+    }
 }

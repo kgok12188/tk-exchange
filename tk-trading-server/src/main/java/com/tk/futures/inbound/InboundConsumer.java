@@ -87,6 +87,7 @@ public class InboundConsumer {
             if (json == null) {
                 return;
             }
+            String reqId = json.getString("reqId");
             String command = json.getString("command");
             Long uid = json.getLong("uid");
             JSONObject data = json.getJSONObject("data");
@@ -94,7 +95,7 @@ public class InboundConsumer {
                 logger.warn("skip message without command, offset={}", record.offset());
                 return;
             }
-            CommandMessage message = new CommandMessage(command, uid, data, record.offset());
+            CommandMessage message = new CommandMessage(reqId, command, uid, data, record.offset());
             commandRouter.route(message);
         } catch (Exception e) {
             logger.error("failed to handle record, offset={}, value={}", record.offset(), record.value(), e);

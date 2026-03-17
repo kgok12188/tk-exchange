@@ -2,8 +2,8 @@ package com.tk.futures.api.async;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
+import com.tk.protocol.dto.TradingRequest;
 import com.tk.protocol.kafka.KafkaTopic;
-import com.tx.common.message.request.KafkaRequest;
 import com.tx.common.service.UserService;
 import com.tx.common.vo.AsyncResult;
 import com.tx.common.vo.R;
@@ -57,15 +57,15 @@ public class AsyncService implements SmartLifecycle {
     }
 
 
-    public DeferredResult<R> send(KafkaRequest kafkaRequest) {
-        if (kafkaRequest.getReqId() == null || StringUtils.isEmpty(kafkaRequest.getReqId().trim())) {
-            kafkaRequest.setReqId(UUID.randomUUID().toString().replaceAll("-", ""));
+    public DeferredResult<R> send(TradingRequest request) {
+        if (request.getReqId() == null || StringUtils.isEmpty(request.getReqId().trim())) {
+            request.setReqId(UUID.randomUUID().toString().replaceAll("-", ""));
         }
         DeferredResult<R> deferredResult = new DeferredResult<>(5000L, R.fail(500, "futures.time_out"));
-        deferredResult.onTimeout(() -> deferredResults.remove(kafkaRequest.getReqId()));
-        String group = userService.getById(kafkaRequest.getUid()).getGroupName();
-        deferredResults.put(kafkaRequest.getReqId(), deferredResult);
-        kafkaProducer.send(new ProducerRecord<>(KafkaTopic.TRADING + group, String.valueOf(kafkaRequest.getUid()), JSONObject.toJSONString(kafkaRequest)));
+        deferredResult.onTimeout(() -> deferredResults.remove(request.getReqId()));
+        String group = userService.getById(request.getUid()).getGroupName();
+        deferredResults.put(request.getReqId(), deferredResult);
+        kafkaProducer.send(new ProducerRecord<>(KafkaTopic.TRADING + group, String.valueOf(request.getUid()), JSONObject.toJSONString(request)));
         return deferredResult;
     }
 

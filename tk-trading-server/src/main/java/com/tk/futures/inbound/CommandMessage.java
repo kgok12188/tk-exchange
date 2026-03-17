@@ -5,22 +5,23 @@ import lombok.Getter;
 
 /**
  * 统一封装 trading_(shard) 的输入消息：
- * { "command": "...", "uid": 123456, "data": { ... } }
+ * { "reqId": "...", "command": "...", "uid": 123456, "data": { ... } }
  */
 @Getter
 public class CommandMessage {
 
+    private final String reqId;
     private final String command;
     private final Long uid;
     private final JSONObject data;
     private final long offset;
 
-    public CommandMessage(String command, Long uid, JSONObject data, long offset) {
+    public CommandMessage(String reqId, String command, Long uid, JSONObject data, long offset) {
+        this.reqId = reqId;
         this.command = command;
         this.uid = uid;
         this.data = data;
         this.offset = offset;
     }
-
 }
 

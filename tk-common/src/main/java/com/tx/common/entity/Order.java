@@ -258,6 +258,41 @@ public class Order implements Serializable {
         return Objects.equals(OrderSide.BUY.value, side);
     }
 
+    /**
+     * 创建一个字段逐一复制的副本。
+     */
+    public Order clone() {
+        Order copy = new Order();
+        copy.setId(this.id);
+        copy.setUid(this.uid);
+        copy.setPositionId(this.positionId);
+        copy.setSymbol(this.symbol);
+        copy.setMarketId(this.marketId);
+        copy.setAmount(this.amount);
+        copy.setVolume(this.volume);
+        copy.setDealType(this.dealType);
+        copy.setDealAmount(this.dealAmount);
+        copy.setDealVolume(this.dealVolume);
+        copy.setPriceType(this.priceType);
+        copy.setPrice(this.price);
+        copy.setAvgDealPrice(this.avgDealPrice);
+        copy.setFee(this.fee);
+        copy.setStatus(this.status);
+        copy.setLeverageLevel(this.leverageLevel);
+        copy.setSide(this.side);
+        copy.setOpen(this.open);
+        copy.setPositionType(this.positionType);
+        copy.setRealizedAmount(this.realizedAmount);
+        copy.setCtime(this.ctime);
+        copy.setMtime(this.mtime);
+        copy.setCompletedTime(this.completedTime);
+        copy.setCancelTime(this.cancelTime);
+        copy.setCancelOrder(this.cancelOrder);
+        copy.setMargin(this.margin);
+        copy.setTxid(this.txid);
+        return copy;
+    }
+
     public boolean isSell() {
         return Objects.equals(OrderSide.SELL.value, side);
     }

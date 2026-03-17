@@ -4,11 +4,10 @@ package com.tk.futures.api.controller;
 import com.alibaba.fastjson2.JSONObject;
 import com.tk.futures.api.async.AsyncService;
 import com.tk.futures.api.interceptor.LoginInterceptor;
+import com.tk.protocol.dto.TradingRequest;
 import com.tx.common.entity.MarketConfig;
 import com.tx.common.entity.Order;
-import com.tx.common.entity.Position;
 import com.tx.common.entity.User;
-import com.tx.common.message.request.KafkaRequest;
 import com.tx.common.service.MarketConfigService;
 import com.tx.common.vo.R;
 import io.swagger.annotations.ApiOperation;
@@ -82,9 +81,8 @@ public class OrderController {
         Order.DealType dealType = Order.DealType.fromValue(order.getDealType());
         Order.OrderSide side = Order.OrderSide.fromValue(order.getSide());
         Order.OPEN open = Order.OPEN.fromValue(order.getOpen());
-        Position.PositionType positionType = Position.PositionType.fromValue(order.getPositionType());
         if (order.getUid() == null || priceType == null || dealType == null || side == null || open == null ||
-                positionType == null || order.getLeverageLevel() <= 0 || order.getLeverageLevel() >= 50 || order.getUid() == 0) {
+                order.getLeverageLevel() <= 0 || order.getLeverageLevel() >= 50 || order.getUid() == 0) {
             R fail = R.fail(500, "futures.params.error");
             DeferredResult<R> deferredResult = new DeferredResult<>(5000L, R.fail(500, "futures.time_out"));
             deferredResult.setResult(fail);
@@ -106,7 +104,11 @@ public class OrderController {
             }
         }
         MarketConfig marketConfig = marketConfigService.getById(order.getMarketId());
-        KafkaRequest request = new KafkaRequest("createOrder", order, order.getUid());
+        TradingRequest request = TradingRequest.builder()
+                .command("NEW_ORDER")
+                .uid(order.getUid())
+                .data(order)
+                .build();
         return asyncService.send(request);
     }
 

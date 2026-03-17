@@ -1,12 +1,13 @@
 package com.tk.futures.model;
 
-import com.alibaba.fastjson2.JSON;
+import com.tk.protocol.dto.TradingSettle;
 import com.tx.common.entity.Account;
 import com.tx.common.entity.Order;
-import com.tx.common.entity.Position;
+import com.tx.common.message.PersistenceBatch;
 import lombok.Data;
 
 import java.util.*;
+import java.util.function.Consumer;
 
 
 @Data
@@ -14,25 +15,21 @@ public class UserTradingBook {
 
     private Long uid;
     private Map<Long, Order> orders = new LinkedHashMap<>();
-    private Map<Long, Position> positions = new LinkedHashMap<>();
     private Map<Long, Account> accounts = new LinkedHashMap<>();
 
     private transient Map<Long, Order> changeOrders = new LinkedHashMap<>();
     private transient HashSet<Long> removeOrderIds = new HashSet<>();
-    private transient Map<Long, Position> changePositions = new LinkedHashMap<>();
-    private transient HashSet<Long> removePositionIds = new HashSet<>();
     private transient Map<Long, Account> changeAccounts = new LinkedHashMap<>();
     private transient HashSet<Long> removeAccountIds = new HashSet<>();
 
+    private Map<Long, TradingSettle> unTradingSettles = new LinkedHashMap<>();
+
     private static final String USDT = "USDT";
 
-    public UserTradingBook(Long uid, LinkedList<Order> orders, LinkedList<Position> positions, LinkedList<Account> accounts) {
+    public UserTradingBook(Long uid, List<Order> orders, List<Account> accounts) {
         this.uid = uid;
         for (Order order : orders) {
             this.orders.put(order.getId(), order);
-        }
-        for (Position position : positions) {
-            this.positions.put(position.getId(), position);
         }
         for (Account account : accounts) {
             this.accounts.put(account.getId(), account);
@@ -79,7 +76,7 @@ public class UserTradingBook {
         if (account == null) {
             return null;
         }
-        Account copyAccount = JSON.parseObject(JSON.toJSONString(account), Account.class);
+        Account copyAccount = account.clone();
         copyAccount.setTxid(copyAccount.getTxid() == null ? 0 : copyAccount.getTxid() + 1);
         changeAccounts.put(accountId, copyAccount);
         return copyAccount;
@@ -117,24 +114,6 @@ public class UserTradingBook {
         }
     }
 
-    public Position getPositionToBuild(Long positionId) {
-        if (removePositionIds.contains(positionId)) {
-            return null;
-        }
-        Position position = changePositions.get(positionId);
-        if (position != null) {
-            return position;
-        }
-        position = positions.get(positionId);
-        if (position == null) {
-            return null;
-        }
-        Position copyPosition = JSON.parseObject(JSON.toJSONString(position), Position.class);
-        copyPosition.setTxid(copyPosition.getTxid() == null ? 0 : copyPosition.getTxid() + 1);
-        changePositions.put(positionId, copyPosition);
-        return copyPosition;
-    }
-
     public Order getOrderToBuild(Long orderId) {
         if (removeOrderIds.contains(orderId)) {
             return null;
@@ -147,18 +126,10 @@ public class UserTradingBook {
         if (order == null) {
             return null;
         }
-        Order copyOrder = JSON.parseObject(JSON.toJSONString(order), Order.class);
+        Order copyOrder = order.clone();
         copyOrder.setTxid(copyOrder.getTxid() == null ? 0 : copyOrder.getTxid() + 1);
         changeOrders.put(orderId, copyOrder);
         return copyOrder;
-    }
-
-    public void removePosition(Position position) {
-        removePositionIds.add(position.getId());
-    }
-
-    public void removePosition(Long positionId) {
-        removePositionIds.add(positionId);
     }
 
     public void removeOrder(Order order) {
@@ -170,37 +141,84 @@ public class UserTradingBook {
     }
 
 
-    public void commit() {
-        changeOrders.forEach((id, order) -> {
-            if (removeOrderIds.contains(id)) {
-                orders.remove(id);
-                return;
+    /**
+     * 提交本次事务的内存变更，并将需要持久化的订单/账户记录组装为 PersistenceBatchList 交给 consumer。
+     * <p>
+     * - 先基于 changeOrders/changeAccounts 和 removeId 集合更新已提交状态（orders/accounts）。
+     * - 再将本次有效变更组装为批次（订单批次 + 账户批次），通过 consumer 传递给上层。
+     * - 最后清空本次事务的增量缓存，准备下一次指令。
+     */
+    public void commit(Consumer<PersistenceBatchList> consumer) {
+        PersistenceBatchList batches = new PersistenceBatchList();
+
+        // 订单变更批次
+        if (!changeOrders.isEmpty()) {
+            PersistenceBatch orderBatch = new PersistenceBatch();
+            orderBatch.setType(PersistenceBatch.Type.ORDER.getValue());
+            List<Object> orderMessages = new ArrayList<>();
+            changeOrders.forEach((id, order) -> {
+                if (removeOrderIds.contains(id)) {
+                    orders.remove(id);
+                } else {
+                    orders.put(id, order);
+                    orderMessages.add(order);
+                }
+            });
+            if (!orderMessages.isEmpty()) {
+                orderBatch.setMessages(orderMessages);
+                batches.add(orderBatch);
             }
-            orders.put(id, order);
-        });
-        changePositions.forEach((id, position) -> {
-            if (removePositionIds.contains(id)) {
-                positions.remove(id);
-                return;
+        } else {
+            // 即便没有新增/修改订单，也要处理删除标记
+            removeOrderIds.forEach(orders::remove);
+        }
+
+        // 账户变更批次
+        if (!changeAccounts.isEmpty()) {
+            PersistenceBatch accountBatch = new PersistenceBatch();
+            accountBatch.setType(PersistenceBatch.Type.ACCOUNT.getValue());
+            List<Object> accountMessages = new ArrayList<>();
+            changeAccounts.forEach((id, account) -> {
+                if (removeAccountIds.contains(id)) {
+                    accounts.remove(id);
+                } else {
+                    accounts.put(id, account);
+                }
+                accountMessages.add(account);
+            });
+            if (!accountMessages.isEmpty()) {
+                accountBatch.setMessages(accountMessages);
+                batches.add(accountBatch);
             }
-            positions.put(id, position);
-        });
-        changeAccounts.forEach((id, account) -> {
-            if (removeAccountIds.contains(id)) {
-                accounts.remove(id);
-                return;
-            }
-            accounts.put(id, account);
-        });
+        } else {
+            removeAccountIds.forEach(accounts::remove);
+        }
+
+        // 清理本次事务的增量缓存
+        changeOrders = new LinkedHashMap<>();
+        removeOrderIds = new HashSet<>();
+        changeAccounts = new LinkedHashMap<>();
+        removeAccountIds = new HashSet<>();
+
+        // 将本次事务的持久化批次交给上层
+        if (consumer != null && !batches.isEmpty()) {
+            consumer.accept(batches);
+        }
     }
 
     public void rollback() {
         changeOrders = new LinkedHashMap<>();
         removeOrderIds = new HashSet<>();
-        changePositions = new LinkedHashMap<>();
-        removePositionIds = new HashSet<>();
         changeAccounts = new LinkedHashMap<>();
         removeAccountIds = new HashSet<>();
+    }
+
+    public void addTradingSettle(Long offset, TradingSettle tradingSettle) {
+        unTradingSettles.put(offset, tradingSettle);
+    }
+
+    public void removeTradingSettle(Long offset) {
+        unTradingSettles.remove(offset);
     }
 
 }

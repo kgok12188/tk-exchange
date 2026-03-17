@@ -2,7 +2,7 @@ package com.tk.futures.api.controller;
 
 import com.alibaba.fastjson2.JSONObject;
 import com.tk.futures.api.async.AsyncService;
-import com.tx.common.message.request.KafkaRequest;
+import com.tk.protocol.dto.TradingRequest;
 import com.tx.common.vo.R;
 import io.swagger.annotations.ApiOperation;
 import jakarta.servlet.http.HttpServletRequest;
@@ -49,7 +49,11 @@ public class PositionController {
     @ApiOperation(value = "持仓/资产列表")
     @PostMapping(value = "/get_assets_list", produces = "application/json;charset=utf-8")
     public DeferredResult<R> getAssetsList(@RequestBody JSONObject params) {
-        return asyncService.send(new KafkaRequest("getAssetsList", null, params.getLong("uid")));
+        TradingRequest request = TradingRequest.builder()
+                .command("GET_ASSETS_LIST")
+                .uid(params.getLong("uid"))
+                .build();
+        return asyncService.send(request);
     }
 
     /**

@@ -5,6 +5,7 @@ import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import com.tk.futures.inbound.CommandMessage;
+import com.tk.futures.result.ResponsePublisher;
 import com.tk.futures.result.ResultPublisher;
 import com.tk.futures.settlement.SettlementEngine;
 import com.tk.futures.settlement.UserCommandHandler;
@@ -33,20 +34,23 @@ public class SettlementSlotManager {
 
     private final List<Disruptor<CommandMessageEvent>> disruptors = new ArrayList<>(SLOTS);
     private final List<RingBuffer<CommandMessageEvent>> ringBuffers = new ArrayList<>(SLOTS);
-    private final List<SlotContext> slotStates = new ArrayList<>(SLOTS);
+    private final List<SlotContext> slotContexts = new ArrayList<>(SLOTS);
 
     private final SettlementEngine settlementEngine;
     private final UserCommandHandler userCommandHandler;
     private final String shard;
     private final ResultPublisher resultPublisher;
+    private final ResponsePublisher responsePublisher;
 
     public SettlementSlotManager(SettlementEngine settlementEngine,
                                  UserCommandHandler userCommandHandler,
                                  ResultPublisher resultPublisher,
+                                 ResponsePublisher responsePublisher,
                                  @org.springframework.beans.factory.annotation.Value("${shard.id}") String shard) {
         this.settlementEngine = settlementEngine;
         this.userCommandHandler = userCommandHandler;
         this.resultPublisher = resultPublisher;
+        this.responsePublisher = responsePublisher;
         this.shard = shard;
     }
 
@@ -54,7 +58,7 @@ public class SettlementSlotManager {
     public void start() {
         for (int i = 0; i < SLOTS; i++) {
             SlotContext state = new SlotContext(i);
-            slotStates.add(state);
+            slotContexts.add(state);
             int slotIndex = i;
             int bufferSize = 1024;
             ThreadFactory threadFactory = r -> new Thread(r, "settlement-slot-" + slotIndex);
@@ -66,7 +70,7 @@ public class SettlementSlotManager {
                     new BlockingWaitStrategy()
             );
             disruptor.handleEventsWith(
-                    new SettlementEventHandler(slotIndex, state, settlementEngine, userCommandHandler, resultPublisher, shard)
+                    new SettlementEventHandler(slotIndex, state, settlementEngine, userCommandHandler, resultPublisher, responsePublisher, shard)
             );
             disruptor.start();
             disruptors.add(disruptor);

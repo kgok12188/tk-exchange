@@ -1,7 +1,13 @@
 package com.tx.common.service;
 
-import com.tx.common.entity.*;
-import com.tx.common.mapper.*;
+import com.tx.common.entity.Account;
+import com.tx.common.entity.Order;
+import com.tx.common.entity.TradeOrder;
+import com.tx.common.entity.Transfer;
+import com.tx.common.mapper.AccountMapper;
+import com.tx.common.mapper.OrderMapper;
+import com.tx.common.mapper.TradeOrderMapper;
+import com.tx.common.mapper.TransferMapper;
 import com.tx.common.message.PersistenceBatch;
 import org.springframework.stereotype.Service;
 
@@ -19,15 +25,15 @@ public class PersistenceService {
 
     private final OrderMapper orderMapper;
 
-    private final PositionMapper positionMapper;
 
-
-    public PersistenceService(TransferMapper transferMapper, AccountMapper accountMapper, TradeOrderMapper tradeOrderMapper, OrderMapper orderMapper, PositionMapper positionMapper) {
+    public PersistenceService(TransferMapper transferMapper,
+                              AccountMapper accountMapper,
+                              TradeOrderMapper tradeOrderMapper,
+                              OrderMapper orderMapper) {
         this.transferMapper = transferMapper;
         this.accountMapper = accountMapper;
         this.tradeOrderMapper = tradeOrderMapper;
         this.orderMapper = orderMapper;
-        this.positionMapper = positionMapper;
     }
 
     /**
@@ -55,11 +61,6 @@ public class PersistenceService {
                 case ORDER:
                     for (Object message : messageItem.getMessages()) {
                         orderMapper.upsert((Order) message);
-                    }
-                    break;
-                case POSITION:
-                    for (Object message : messageItem.getMessages()) {
-                        positionMapper.upsert((Position) message);
                     }
                     break;
                 case TRADE_ORDER:

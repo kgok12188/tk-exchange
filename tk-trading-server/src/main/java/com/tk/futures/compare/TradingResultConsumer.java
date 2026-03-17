@@ -1,4 +1,4 @@
-package com.tk.futures.queue;
+package com.tk.futures.compare;
 
 import com.google.common.collect.Lists;
 import com.tk.protocol.kafka.KafkaTopic;
