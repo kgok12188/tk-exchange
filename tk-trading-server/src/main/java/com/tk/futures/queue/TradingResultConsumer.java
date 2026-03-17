@@ -1,7 +1,7 @@
 package com.tk.futures.queue;
 
 import com.google.common.collect.Lists;
-import com.tx.common.kafka.KafkaTopic;
+import com.tk.protocol.kafka.KafkaTopic;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.apache.kafka.clients.consumer.ConsumerConfig;

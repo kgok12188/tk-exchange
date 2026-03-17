@@ -72,7 +72,7 @@ public final class OrderBook {
      *
      * @param orderReqOffset Kafka partition offset of the order_req message (written to TradeOrder.matchId for all trades from this command).
      */
-    public MatchResult addOrder(OrderPayload payload, long orderReqOffset) {
+    public MatchResult pushOrder(OrderPayload payload, long orderReqOffset) {
         if (payload == null) return emptyResult();
         BigDecimal volume = effectiveVolume(payload);
         if (volume == null || volume.compareTo(ZERO) <= 0) return emptyResult();
@@ -103,8 +103,6 @@ public final class OrderBook {
         FinishOrder fo = finishOrder(order, FinishStatus.CANCEL, order.getRemainingVolume());
         return MatchResult.of(Collections.emptyList(), List.of(fo));
     }
-
-    // --- Access for matchers (same package) ---
 
     TreeMap<BigDecimal, PriceLevel> getBuySide() {
         return buySide;
@@ -138,11 +136,11 @@ public final class OrderBook {
     }
 
     void removeFromBook(BookOrder order) {
-        TreeMap<BigDecimal, PriceLevel> book = order.isSideBuy() ? buySide : sellSide;
-        PriceLevel level = book.get(order.getPrice());
+        TreeMap<BigDecimal, PriceLevel> levelMap = order.isSideBuy() ? buySide : sellSide;
+        PriceLevel level = levelMap.get(order.getPrice());
         if (level != null) {
             level.remove(order.getSeq());
-            if (level.isEmpty()) book.remove(order.getPrice());
+            if (level.isEmpty()) levelMap.remove(order.getPrice());
         }
     }
 
@@ -187,9 +185,9 @@ public final class OrderBook {
                 .sellShardId(takerBuy ? maker.getShardId() : taker.getShardId()).build();
     }
 
-    static FinishOrder finishOrder(BookOrder o, FinishStatus status, BigDecimal leaveVolume) {
-        return FinishOrder.builder().uid(o.getUid()).orderId(o.getOrderId()).status(status)
-                .leaveVolume(leaveVolume).leaveAmount(leaveVolume != null && o.getPrice() != null && leaveVolume.signum() > 0 ? leaveVolume.multiply(o.getPrice()) : null).build();
+    static FinishOrder finishOrder(BookOrder bookOrder, FinishStatus status, BigDecimal leaveVolume) {
+        return FinishOrder.builder().uid(bookOrder.getUid()).orderId(bookOrder.getOrderId()).shardId(bookOrder.getShardId()).status(status)
+                .leaveVolume(leaveVolume).leaveAmount(leaveVolume != null && bookOrder.getPrice() != null && leaveVolume.signum() > 0 ? leaveVolume.multiply(bookOrder.getPrice()) : null).build();
     }
 
     private static MatchResult emptyResult() {

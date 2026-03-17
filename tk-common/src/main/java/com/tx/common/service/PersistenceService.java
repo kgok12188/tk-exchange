@@ -2,7 +2,7 @@ package com.tx.common.service;
 
 import com.tx.common.entity.*;
 import com.tx.common.mapper.*;
-import com.tx.common.message.AsyncMessageItem;
+import com.tx.common.message.PersistenceBatch;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -35,9 +35,9 @@ public class PersistenceService {
      *
      * @param messageItems 命令消息
      */
-    public void flush(List<AsyncMessageItem> messageItems) {
-        for (AsyncMessageItem messageItem : messageItems) {
-            AsyncMessageItem.Type type = AsyncMessageItem.Type.fromValue(messageItem.getType());
+    public void flush(List<PersistenceBatch> messageItems) {
+        for (PersistenceBatch messageItem : messageItems) {
+            PersistenceBatch.Type type = PersistenceBatch.Type.fromValue(messageItem.getType());
             if (type == null) {
                 continue;
             }

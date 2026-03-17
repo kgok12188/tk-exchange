@@ -29,3 +29,11 @@ logging:
 kafka:
   servers: localhost:9092
 
+# 通配符消费所有 trading-result-(分片)，故障重试退避
+flush:
+  consumer:
+    threads: 4
+  retry:
+    interval-ms: 1000
+    backoff-max-ms: 30000
+

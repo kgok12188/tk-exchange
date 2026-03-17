@@ -3,82 +3,95 @@ package com.tk.flush;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.google.common.collect.Lists;
+import com.tk.protocol.kafka.KafkaTopic;
 import com.tx.common.entity.*;
-import com.tx.common.kafka.KafkaTopic;
-import com.tx.common.message.AsyncMessageItem;
+import com.tx.common.message.PersistenceBatch;
 import com.tx.common.service.PersistenceService;
-import com.tx.common.service.WorkerOrderGroupService;
 import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * @author louis
- * 1、将内存中变更的数据同步到数据库
- * 2、只会保留txid 最大的数据
+ * 消费所有分片的 trading_result_(分片) topic，将变更同步到数据库。
+ * 使用 topic 通配符订阅所有分区、所有分片；单条失败时回退 offset 并重试（带退避）。
  */
 @Service
 public class DataSynchronizationService implements SmartLifecycle {
 
     private static final AtomicInteger threadNumberIndex = new AtomicInteger(0);
-
     private static final Logger logger = LoggerFactory.getLogger(DataSynchronizationService.class);
 
+    /**
+     * 匹配所有分片：trading-result-0, trading-result-1, ...
+     */
+    private static final Pattern TRADING_RESULT_TOPIC_PATTERN =
+            Pattern.compile("^" + Pattern.quote(KafkaTopic.TRADING_RESULT) + ".+");
+
     private final String servers;
+    private final int consumerThreads;
+    private final long retryIntervalMs;
+    private final int retryBackoffMaxMs;
 
     private ExecutorService executor;
-
     private volatile boolean start;
 
-    private int consumerThreadNumber;
+    private final PersistenceService persistenceService;
 
-    private static final String consumerGroupId = "flush";
-
-    @Autowired
-    private PersistenceService persistenceService;
-    @Autowired
-    private WorkerOrderGroupService workerOrderGroupService;
-
-    public DataSynchronizationService(@Value("${kafka.servers}") String servers) {
+    public DataSynchronizationService(@Value("${kafka.servers}") String servers,
+                                      @Value("${flush.consumer.threads:4}") int consumerThreads,
+                                      @Value("${flush.retry.interval-ms:1000}") long retryIntervalMs,
+                                      @Value("${flush.retry.backoff-max-ms:30000}") int retryBackoffMaxMs,
+                                      PersistenceService persistenceService) {
         this.servers = servers;
+        this.consumerThreads = consumerThreads <= 0 ? 4 : consumerThreads;
+        this.retryIntervalMs = retryIntervalMs;
+        this.retryBackoffMaxMs = Math.max(retryBackoffMaxMs, (int) retryIntervalMs);
+        this.persistenceService = persistenceService;
     }
 
+    @Override
     public void start() {
-        List<String> topicList = workerOrderGroupService.lambdaQuery().list().stream().map(item -> KafkaTopic.TRADING_RESULT + item.getGroupName()).collect(Collectors.toList());
-        logger.info("start_consumer : {}", consumerGroupId);
+        logger.info("start_consumer: group=flush, pattern={}, threads={}", TRADING_RESULT_TOPIC_PATTERN, consumerThreads);
         start = true;
-        // 1. 获取主题分区数
-        consumerThreadNumber = 2;
-        // 2. 创建线程池（线程数=分区数）
-        executor = new ThreadPoolExecutor(consumerThreadNumber, consumerThreadNumber, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), r -> new Thread(r, consumerGroupId + "-" + threadNumberIndex.incrementAndGet()));
-        // 3. 为每个分区创建消费者
-        for (int partition = 0; partition < consumerThreadNumber; partition++) {
-            executor.execute(() -> this.createPartitionConsumer(topicList));
+        executor = new ThreadPoolExecutor(
+                consumerThreads, consumerThreads,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                r -> new Thread(r, "flush-sync-" + threadNumberIndex.incrementAndGet())
+        );
+        for (int i = 0; i < consumerThreads; i++) {
+            executor.execute(this::runConsumer);
         }
-        logger.info("started_consumer : groupId = {},\tpartitionCount = {}", consumerGroupId, consumerThreadNumber);
+        logger.info("started_consumer: group=flush, threadCount={}", consumerThreads);
     }
 
+    @Override
     public void stop() {
         if (start) {
             start = false;
             if (executor != null) {
                 executor.shutdown();
+                try {
+                    if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                        executor.shutdownNow();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    executor.shutdownNow();
+                }
             }
-            logger.info("stop_sync_to_db_consumer : {},\t{}", "flush", consumerThreadNumber);
+            logger.info("stop_sync_to_db_consumer: group=flush");
         }
     }
 
@@ -87,141 +100,166 @@ public class DataSynchronizationService implements SmartLifecycle {
         return start;
     }
 
-    private void createPartitionConsumer(List<String> groupList) {
+    private void runConsumer() {
+        Properties props = getProperties();
+
+        Map<String, Map<Integer, Long>> topicOffsetPartitions = new ConcurrentHashMap<>();
+
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+            consumer.subscribe(TRADING_RESULT_TOPIC_PATTERN, new ConsumerRebalanceListener() {
+                @Override
+                public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+                    for (TopicPartition p : partitions) {
+                        Map<Integer, Long> map = topicOffsetPartitions.get(p.topic());
+                        if (map != null) {
+                            map.remove(p.partition());
+                        }
+                    }
+                }
+
+                @Override
+                public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+                    for (TopicPartition p : partitions) {
+                        topicOffsetPartitions.computeIfAbsent(p.topic(), k -> new ConcurrentHashMap<>()).put(p.partition(), null);
+                    }
+                    logger.info("onPartitionsAssigned: {}", partitions.stream().map(p -> p.topic() + "-" + p.partition()).collect(Collectors.toList()));
+                }
+            });
+
+            int consecutiveFailures = 0;
+
+            while (start) {
+                ConsumerRecords<String, String> records;
+                try {
+                    records = consumer.poll(Duration.ofMillis(200));
+                } catch (Exception e) {
+                    logger.warn("poll error", e);
+                    sleepRetry(consecutiveFailures);
+                    continue;
+                }
+
+                if (records.isEmpty()) {
+                    consecutiveFailures = 0;
+                    continue;
+                }
+
+                boolean batchSuccess = true;
+                for (ConsumerRecord<String, String> record : records) {
+                    Map<Integer, Long> offsetMap = topicOffsetPartitions.computeIfAbsent(record.topic(), k -> new ConcurrentHashMap<>());
+                    offsetMap.put(record.partition(), record.offset());
+
+                    try {
+                        processRecord(record);
+                        consecutiveFailures = 0;
+                    } catch (Exception e) {
+                        logger.error("processRecord failed, topic={}, partition={}, offset={}, value={}",
+                                record.topic(), record.partition(), record.offset(), record.value(), e);
+                        batchSuccess = false;
+                        consumer.seek(new TopicPartition(record.topic(), record.partition()), record.offset());
+                        sleepRetry(++consecutiveFailures);
+                        break;
+                    }
+                }
+
+                if (batchSuccess) {
+                    try {
+                        consumer.commitSync();
+                    } catch (Exception ee) {
+                        logger.warn("commitSync failed", ee);
+                        for (Map.Entry<String, Map<Integer, Long>> e : topicOffsetPartitions.entrySet()) {
+                            for (Map.Entry<Integer, Long> pe : e.getValue().entrySet()) {
+                                if (pe.getValue() != null) {
+                                    consumer.seek(new TopicPartition(e.getKey(), pe.getKey()), pe.getValue());
+                                }
+                            }
+                        }
+                        sleepRetry(++consecutiveFailures);
+                    }
+                }
+            }
+            logger.info("stop_consumer: group=flush");
+        }
+    }
+
+    private Properties getProperties() {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, servers);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "flush");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            HashMap<String, Map<Integer, Long>> topicOffsetPartitions = new HashMap<>();
-            for (String topic : groupList) {
-                topicOffsetPartitions.put(topic, new HashMap<>());
-            }
-            consumer.subscribe(groupList, new ConsumerRebalanceListener() {
-                @Override
-                public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                    for (TopicPartition partition : partitions) {
-                        Map<Integer, Long> offsetMap = topicOffsetPartitions.get(partition.topic());
-                        offsetMap.remove(partition.partition());
-                    }
-                }
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        return props;
+    }
 
-                @Override
-                public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                    logger.info("onPartitionsAssigned : {}", partitions.stream().map(p -> (p.topic() + "-" + p.partition())).collect(Collectors.toList()));
-                }
-
-            });
-            while (start) {
-                ConsumerRecords<String, String> records = null;
-                try {
-                    records = consumer.poll(Duration.ofMillis(200));
-                } catch (Exception e) {
-                    logger.warn("poll", e);
-                }
-                if (records == null) {
-                    continue;
-                }
-                boolean suc = false;
-                for (ConsumerRecord<String, String> record : records) {
-                    try {
-                        Map<Integer, Long> offsetMap = topicOffsetPartitions.get(record.topic());
-                        offsetMap.put(record.partition(), record.offset());
-                        processRecord(record); // 业务处理
-                        suc = true;
-                    } catch (Exception e) {
-                        logger.error("ConsumerRecords : {}", record.value(), e);
-                        suc = false;
-                        for (Map.Entry<String, Map<Integer, Long>> topicOffsetPartition : topicOffsetPartitions.entrySet()) {
-                            String topic = topicOffsetPartition.getKey();
-                            for (Map.Entry<Integer, Long> kv : topicOffsetPartition.getValue().entrySet()) {
-                                consumer.seek(new TopicPartition(topic, kv.getKey()), kv.getValue());
-                            }
-                        }
-                        break;
-                    }
-                }
-                if (suc) {
-                    consumer.commitSync(); // 手动提交偏移量
-                } else {
-                    try {
-                        Thread.sleep(1000); // 消费失败，间隔1s后重试
-                    } catch (Exception ex) {
-                        // todo
-                    }
-                }
-            }
-            logger.info("stop_consumer : {}", consumerGroupId);
+    private void sleepRetry(int consecutiveFailures) {
+        long ms = Math.min(retryIntervalMs * (1L << Math.min(consecutiveFailures, 10)), retryBackoffMaxMs);
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            logger.warn("retry sleep interrupted");
         }
     }
 
     private void processRecord(ConsumerRecord<String, String> record) {
-        List<AsyncMessageItem> messageItems = new ArrayList<>();
-        logger.info("sync_to_db : {}", record.value());
+        List<PersistenceBatch> messageItems = new ArrayList<>();
+        if (logger.isDebugEnabled()) {
+            logger.debug("sync_to_db: topic={}, partition={}, offset={}", record.topic(), record.partition(), record.offset());
+        }
         JSONArray array = JSON.parseArray(record.value());
+        if (array == null) {
+            return;
+        }
         for (int i = 0; i < array.size(); i++) {
-            AsyncMessageItem.Type type = AsyncMessageItem.Type.fromValue(array.getJSONObject(i).getInteger("type"));
+            PersistenceBatch.Type type = PersistenceBatch.Type.fromValue(array.getJSONObject(i).getInteger("type"));
             if (type == null) {
                 continue;
             }
             JSONArray messages = array.getJSONObject(i).getJSONArray("messages");
+            if (messages == null) {
+                continue;
+            }
             switch (type) {
                 case ACCOUNT:
                     for (int j = 0; j < messages.size(); j++) {
-                        Account account = messages.getJSONObject(j).toJavaObject(Account.class);
-                        if (!messageItems.isEmpty() && Objects.equals(messageItems.get(messageItems.size() - 1).getType(), type.getValue())) {
-                            messageItems.get(messageItems.size() - 1).getMessages().add(account);
-                        } else {
-                            messageItems.add(new AsyncMessageItem(type.getValue(), Lists.newArrayList(account)));
-                        }
+                        appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(Account.class));
                     }
                     break;
                 case TRANSFER:
                     for (int j = 0; j < messages.size(); j++) {
-                        Transfer transfer = messages.getJSONObject(j).toJavaObject(Transfer.class);
-                        if (!messageItems.isEmpty() && Objects.equals(messageItems.get(messageItems.size() - 1).getType(), type.getValue())) {
-                            messageItems.get(messageItems.size() - 1).getMessages().add(transfer);
-                        } else {
-                            messageItems.add(new AsyncMessageItem(type.getValue(), Lists.newArrayList(transfer)));
-                        }
+                        appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(Transfer.class));
                     }
                     break;
                 case ORDER:
                     for (int j = 0; j < messages.size(); j++) {
-                        Order order = messages.getJSONObject(j).toJavaObject(Order.class);
-                        if (!messageItems.isEmpty() && Objects.equals(messageItems.get(messageItems.size() - 1).getType(), type.getValue())) {
-                            messageItems.get(messageItems.size() - 1).getMessages().add(order);
-                        } else {
-                            messageItems.add(new AsyncMessageItem(type.getValue(), Lists.newArrayList(order)));
-                        }
+                        appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(Order.class));
                     }
                     break;
                 case POSITION:
                     for (int j = 0; j < messages.size(); j++) {
-                        Position position = messages.getJSONObject(j).toJavaObject(Position.class);
-                        if (!messageItems.isEmpty() && Objects.equals(messageItems.get(messageItems.size() - 1).getType(), type.getValue())) {
-                            messageItems.get(messageItems.size() - 1).getMessages().add(position);
-                        } else {
-                            messageItems.add(new AsyncMessageItem(type.getValue(), Lists.newArrayList(position)));
-                        }
+                        appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(Position.class));
                     }
                     break;
                 case TRADE_ORDER:
                     for (int j = 0; j < messages.size(); j++) {
-                        TradeOrder tradeOrder = messages.getJSONObject(j).toJavaObject(TradeOrder.class);
-                        if (!messageItems.isEmpty() && Objects.equals(messageItems.get(messageItems.size() - 1).getType(), type.getValue())) {
-                            messageItems.get(messageItems.size() - 1).getMessages().add(tradeOrder);
-                        } else {
-                            messageItems.add(new AsyncMessageItem(type.getValue(), Lists.newArrayList(tradeOrder)));
-                        }
+                        appendMessage(messageItems, type, messages.getJSONObject(j).toJavaObject(TradeOrder.class));
                     }
                     break;
                 default:
+                    break;
             }
+        }
+        if (!messageItems.isEmpty()) {
             persistenceService.flush(messageItems);
         }
     }
 
+    private void appendMessage(List<PersistenceBatch> messageItems, PersistenceBatch.Type type, Object entity) {
+        if (!messageItems.isEmpty() && Objects.equals(messageItems.get(messageItems.size() - 1).getType(), type.getValue())) {
+            messageItems.get(messageItems.size() - 1).getMessages().add(entity);
+        } else {
+            messageItems.add(new PersistenceBatch(type.getValue(), Lists.newArrayList(entity)));
+        }
+    }
 }

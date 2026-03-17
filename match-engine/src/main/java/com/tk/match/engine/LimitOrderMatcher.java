@@ -33,6 +33,7 @@ public final class LimitOrderMatcher implements OrderMatcher {
                 BigDecimal fill = takerOrder.getRemainingVolume().min(makerOrder.getRemainingVolume());
                 takerOrder.setRemainingVolume(takerOrder.getRemainingVolume().subtract(fill));
                 makerOrder.setRemainingVolume(makerOrder.getRemainingVolume().subtract(fill));
+                level.subtractVolume(fill);
                 long index = trades.size();
                 trades.add(OrderBook.buildTrade(index, orderReqOffset, price, fill, takerOrder, makerOrder));
                 if (makerOrder.getRemainingVolume().compareTo(ZERO) <= 0) {
@@ -51,4 +52,5 @@ public final class LimitOrderMatcher implements OrderMatcher {
         }
         return MatchResult.of(trades, finishes);
     }
+
 }

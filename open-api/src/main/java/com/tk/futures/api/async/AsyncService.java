@@ -2,7 +2,7 @@ package com.tk.futures.api.async;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
-import com.tx.common.kafka.KafkaTopic;
+import com.tk.protocol.kafka.KafkaTopic;
 import com.tx.common.message.request.KafkaRequest;
 import com.tx.common.service.UserService;
 import com.tx.common.vo.AsyncResult;
@@ -65,7 +65,7 @@ public class AsyncService implements SmartLifecycle {
         deferredResult.onTimeout(() -> deferredResults.remove(kafkaRequest.getReqId()));
         String group = userService.getById(kafkaRequest.getUid()).getGroupName();
         deferredResults.put(kafkaRequest.getReqId(), deferredResult);
-        kafkaProducer.send(new ProducerRecord<>(KafkaTopic.TRADING_MESSAGE + group, String.valueOf(kafkaRequest.getUid()), JSONObject.toJSONString(kafkaRequest)));
+        kafkaProducer.send(new ProducerRecord<>(KafkaTopic.TRADING + group, String.valueOf(kafkaRequest.getUid()), JSONObject.toJSONString(kafkaRequest)));
         return deferredResult;
     }
 
@@ -95,7 +95,7 @@ public class AsyncService implements SmartLifecycle {
         props.put("enable.auto.commit", "true");
 
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            consumer.subscribe(Collections.singletonList(KafkaTopic.RESPONSE_MESSAGE));
+            consumer.subscribe(Collections.singletonList(KafkaTopic.RESPONSE));
             try {
                 while (start) {
                     ConsumerRecords<String, String> consumerRecords = consumer.poll(Duration.ofMillis(500));

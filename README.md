@@ -582,7 +582,7 @@ trading-server 通过 **trading_result_(分区)** 输出内存变更，由 **tra
          │  trading_result_(分区) ← 仅主节点 sendToMq（多 partition，每个 ringBuffer 写各自 partition）；断点 ③：MATCH/NEW_ORDER 后需调用
          ▼
   ┌─────────────────────────────────────────────────────────────────────────────────────┐
-  │  TradingResultSyncService 消费 trading_result_(分区) → PersistenceService.flush 落库 (已有)   │
+  │  flush-service 的 DataSynchronizationService 消费 trading_result_(分区) → PersistenceService.flush 落库 (已有)   │
   └─────────────────────────────────────────────────────────────────────────────────────┘
 
   Topic 命名统一下划线，与代码对应:
@@ -620,4 +620,4 @@ trading-server 通过 **trading_result_(分区)** 输出内存变更，由 **tra
 - 步骤 4 可与 1、2 并行，依赖 response_message 与 open_api 的订阅（已有）。
 - 步骤 5、6 在 1–4 跑通后再完善即可。
 
-**当前可复用**：open_api 写 trading_(分区)、MessageQueueService 按 uid 槽位消费、RingBufferTradingBook/UserTradingBook 结构、match-engine 全流程、TradingResultSyncService 消费 trading_result_(分区) 落库、UserDataService.sendToMq 与 AsyncMessageItem 格式。**实现 NEW_ORDER/MATCH 及 sendToMq、response 时，需根据 Zookeeper 主从状态判断：仅主节点写入 trading_result_(分区)（多 partition，每 ringBuffer 写各自 partition）与 response（按需）、order_req_(币对)（按需）。所有 Kafka topic 命名统一使用下划线。**
+**当前可复用**：open_api 写 trading_(分区)、MessageQueueService 按 uid 槽位消费、RingBufferTradingBook/UserTradingBook 结构、match-engine 全流程、flush-service 的 DataSynchronizationService 消费 trading_result_(分区) 落库、UserDataService.sendToMq 与 AsyncMessageItem 格式。**实现 NEW_ORDER/MATCH 及 sendToMq、response 时，需根据 Zookeeper 主从状态判断：仅主节点写入 trading_result_(分区)（多 partition，每 ringBuffer 写各自 partition）与 response（按需）、order_req_(币对)（按需）。所有 Kafka topic 命名统一使用下划线。**

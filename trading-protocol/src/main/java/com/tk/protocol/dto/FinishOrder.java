@@ -20,4 +20,5 @@ public class FinishOrder {
     private FinishStatus status;
     private BigDecimal leaveAmount;
     private BigDecimal leaveVolume;
+    private int shardId;
 }

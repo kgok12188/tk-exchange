@@ -187,26 +187,17 @@ public class MatchSlot {
         disruptor = new Disruptor<>(
                 new SlotTaskEventFactory(),
                 RING_BUFFER_SIZE,
-                r -> new Thread(r, "match-slot-" + index),
+                r -> {
+                    return new Thread(r, "match-slot-" + index);
+                },
                 ProducerType.SINGLE,
                 new BlockingWaitStrategy());
         disruptor.handleEventsWith((event, sequence, endOfBatch) -> dispatchSlotTaskEvent(event));
         disruptor.start();
         ringBuffer = disruptor.getRingBuffer();
-        startLatch = new CountDownLatch(1);
-        long seq = ringBuffer.next();
-        try {
-            ringBuffer.get(seq).setStart();
-        } finally {
-            ringBuffer.publish(seq);
-        }
-        try {
-            startLatch.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("MatchSlot start interrupted", e);
-        }
-        log.info("MatchSlot started index={} symbols={} engines={} disruptor=BlockingWaitStrategy", index, symbols.size(), enginesBySymbol.size());
+        consumerThread = new Thread(this::consumeLoop, "order-consumer-" + index);
+        consumerThread.setDaemon(true);
+        consumerThread.start();
     }
 
     private static OrderBook getOrderBook(MatchEngine engine, SnapshotLoadResult loaded) {
@@ -249,6 +240,21 @@ public class MatchSlot {
     }
 
     private void consumeLoop() {
+        startLatch = new CountDownLatch(1);
+        long seq = ringBuffer.next();
+        try {
+            ringBuffer.get(seq).setStart();
+        } finally {
+            ringBuffer.publish(seq);
+        }
+        try {
+            startLatch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("MatchSlot start interrupted", e);
+        }
+        log.info("MatchSlot started index={} symbols={} engines={} disruptor=BlockingWaitStrategy", index, symbols.size(), enginesBySymbol.size());
+
         while (running.get()) {
             try {
                 drainPendingSlotEvents();
@@ -262,7 +268,7 @@ public class MatchSlot {
                 for (ConsumerRecord<String, String> record : records) {
                     String topic = record.topic();
                     String symbol = topic.startsWith(ORDER_REQ_PREFIX) ? topic.substring(ORDER_REQ_PREFIX.length()) : topic;
-                    long seq = ringBuffer.next();
+                    seq = ringBuffer.next();
                     try {
                         ringBuffer.get(seq).setOrder(symbol, record.value(), record.offset());
                     } finally {
@@ -390,20 +396,9 @@ public class MatchSlot {
                         isMaster = false;
                     }
                 }
-                case START -> {
-                    try {
-                        consumerThread = new Thread(this::consumeLoop, "order-consumer-" + index);
-                        consumerThread.setDaemon(true);
-                        consumerThread.start();
-                    } finally {
-                        CountDownLatch latch = startLatch;
-                        if (latch != null) {
-                            latch.countDown();
-                            startLatch = null;
-                        }
-                    }
-                }
+                case START -> startLatch.countDown();
                 default -> {
+
                 }
             }
         } catch (Exception e) {

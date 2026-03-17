@@ -15,4 +15,5 @@ import lombok.NoArgsConstructor;
 public class CancelPayload {
     private Long orderId;
     private Long uid;
+    private int shardId;
 }

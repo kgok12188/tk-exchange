@@ -30,6 +30,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
                 BigDecimal fill = order.getRemainingVolume().min(maker.getRemainingVolume());
                 order.setRemainingVolume(order.getRemainingVolume().subtract(fill));
                 maker.setRemainingVolume(maker.getRemainingVolume().subtract(fill));
+                level.subtractVolume(fill);
                 long index = trades.size();
                 trades.add(OrderBook.buildTrade(index, orderReqOffset, price, fill, order, maker));
                 if (maker.getRemainingVolume().compareTo(ZERO) <= 0) {

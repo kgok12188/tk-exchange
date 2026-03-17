@@ -15,4 +15,5 @@ import lombok.NoArgsConstructor;
 public class TakerRef {
     private Long uid;
     private Long orderId;
+    private int shardId;
 }

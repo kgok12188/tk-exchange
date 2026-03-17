@@ -72,7 +72,7 @@ public class OrderReqProducerRunner {
                 OrderPayload payload = OrderPayload.builder()
                         .id(baseOrderId + i)
                         .uid(uid)
-                        .shardId(0)
+                        .shardId((int) (uid % 2))
                         .symbol(symbol)
                         .marketId(1L)
                         .side(buy ? "BUY" : "SELL")
@@ -104,12 +104,13 @@ public class OrderReqProducerRunner {
             OrderCommand cancelCmd = OrderCommand.builder()
                     .type(CommandType.CANCEL_ORDER)
                     .symbol(symbol)
-                    .cancelPayload(CancelPayload.builder().orderId(cancelOrderId).uid(uid).build())
+                    .cancelPayload(CancelPayload.builder().shardId((int) (uid % 2)).orderId(cancelOrderId).uid(uid).build())
                     .build();
             String cancelJson = ProtocolSerde.toJson(cancelCmd);
             producer.send(new ProducerRecord<>(topic, null, cancelJson), (m, ex) -> {
                 if (ex != null) System.err.println("Send CANCEL failed: " + ex.getMessage());
-                else System.out.println("Sent CANCEL_ORDER orderId=" + cancelOrderId + " -> " + m.topic() + "-" + m.partition() + "@" + m.offset());
+                else
+                    System.out.println("Sent CANCEL_ORDER orderId=" + cancelOrderId + " -> " + m.topic() + "-" + m.partition() + "@" + m.offset());
             }).get();
 
             producer.flush();

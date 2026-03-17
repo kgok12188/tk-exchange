@@ -1,7 +1,5 @@
 package com.tk.futures.service;
 
-import com.tk.futures.generator.OrderIdGenerator;
-import com.tk.futures.queue.TradingHandler;
 import com.tx.common.service.WorkerOrderGroupJvmService;
 import com.tx.common.service.WorkerOrderGroupService;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -28,16 +26,9 @@ public class ZookeeperService implements SmartLifecycle {
 
     private final String jvmId;
 
-    private String groupName = "";
-    private final OrderIdGenerator orderIdGenerator;
-
     public ZookeeperService(WorkerOrderGroupJvmService workerOrderGroupJvmService,
-                            TradingHandler tradingHandler,
-                            TradingResultSyncService tradingResultSyncService,
                             @Value("${zookeeper.servers}") String zookeeperUrl, @Value("${kafka.servers}") String kafkaServers,
-                            OrderIdGenerator orderIdGenerator,
                             WorkerOrderGroupService workerOrderGroupService) throws UnknownHostException {
-        this.orderIdGenerator = orderIdGenerator;
         InetAddress addr = InetAddress.getLocalHost();
         jvmId = addr.toString() + ":" + UUID.randomUUID().toString().replaceAll("-", "");
         this.workerOrderGroupJvmService = workerOrderGroupJvmService;

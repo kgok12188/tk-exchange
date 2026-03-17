@@ -40,8 +40,8 @@ public class MatchEngine {
             case PUSH_ORDER: {
                 OrderPayload push = cmd.getPushPayload();
                 if (push == null) return null;
-                takerRef = TakerRef.builder().uid(push.getUid()).orderId(push.getId()).build();
-                MatchResult result = book.addOrder(push, orderReqOffset);
+                takerRef = TakerRef.builder().uid(push.getUid()).orderId(push.getId()).shardId(push.getShardId()).build();
+                MatchResult result = book.pushOrder(push, orderReqOffset);
                 trades.addAll(result.getTrades());
                 finishOrders.addAll(result.getFinishOrders());
                 break;
@@ -50,7 +50,7 @@ public class MatchEngine {
                 CancelPayload cancel = cmd.getCancelPayload();
                 if (cancel == null) return null;
                 if (cancel.getUid() != null) {
-                    takerRef = TakerRef.builder().uid(cancel.getUid()).orderId(cancel.getOrderId()).build();
+                    takerRef = TakerRef.builder().uid(cancel.getUid()).shardId(cancel.getShardId()).orderId(cancel.getOrderId()).build();
                 }
                 MatchResult result = book.cancelOrder(cancel.getOrderId());
                 finishOrders.addAll(result.getFinishOrders());
@@ -61,4 +61,5 @@ public class MatchEngine {
         }
         return MatchResponse.builder().taker(takerRef).trades(trades).offset(orderReqOffset).finishOrders(finishOrders).build();
     }
+
 }
