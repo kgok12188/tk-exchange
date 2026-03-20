@@ -20,6 +20,10 @@ public class SlotContext {
     @Getter
     private long offset;
 
+    @Setter
+    @Getter
+    private long pushOffset;
+
     public SlotContext(int slotIndex) {
         this.slotIndex = slotIndex;
     }

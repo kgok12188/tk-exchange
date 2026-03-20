@@ -1,4 +1,4 @@
-package com.tk.match.queue;
+package com.tk.match.compare;
 
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
 public class DelayedFileDeletionService implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(DelayedFileDeletionService.class);
-    private static final int DELAY_MINUTES = 30;
+    private static final int DELAY_MINUTES = 20;
 
     private final DelayQueue<DelayedPath> queue = new DelayQueue<>();
     private final Thread consumerThread;

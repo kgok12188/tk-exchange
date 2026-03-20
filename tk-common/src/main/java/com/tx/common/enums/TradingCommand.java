@@ -4,7 +4,7 @@ import org.apache.commons.lang3.StringUtils;
 
 public enum TradingCommand {
 
-    NEW_ORDER, CANCEL_ORDER, MATCH, TRANSFER, UPDATE_MARK_PRICE, UPDATE_INDEX_PRICE, CREATE_USER, UNKNOWN;
+    NEW_ORDER, CANCEL_ORDER, MATCH, TRANSFER, UPDATE_MARK_PRICE, UPDATE_INDEX_PRICE, CREATE_USER, MASTER, SLAVE, CHECK, UNKNOWN;
 
     public static TradingCommand ofValue(String name) {
         if (name == null) {

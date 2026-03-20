@@ -12,6 +12,19 @@
     <artifactId>tk-trading-server</artifactId>
 
 
+    <properties>
+        <!-- Chronicle Queue (and related OpenHFT libs) require these JVM args on Java 17+ -->
+        <chronicle.jvm.args>--illegal-access=permit
+            --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED
+            --add-exports=java.base/jdk.internal.util=ALL-UNNAMED
+            --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED
+            --add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED
+            --add-opens=jdk.compiler/com.sun.tools.javac=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+        </chronicle.jvm.args>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>tk</groupId>
@@ -58,6 +71,11 @@
             <groupId>com.lmax</groupId>
             <artifactId>disruptor</artifactId>
         </dependency>
+        <dependency>
+            <groupId>net.openhft</groupId>
+            <artifactId>chronicle-queue</artifactId>
+            <version>5.24ea17</version>
+        </dependency>
     </dependencies>
 
     <build>
@@ -76,6 +94,7 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
                     <includeSystemScope>true</includeSystemScope>
+                    <jvmArguments>${chronicle.jvm.args}</jvmArguments>
                 </configuration>
             </plugin>
             <plugin>

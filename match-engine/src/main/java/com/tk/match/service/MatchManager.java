@@ -1,9 +1,9 @@
 package com.tk.match.service;
 
 import com.tk.match.config.MatchEngineConfig;
-import com.tk.match.queue.DelayedFileDeletionService;
-import com.tk.match.queue.LastWrite;
-import com.tk.match.queue.MatchResultMasterFileQueue;
+import com.tk.match.compare.DelayedFileDeletionService;
+import com.tk.match.compare.LastWrite;
+import com.tk.match.compare.MatchResultMasterFileQueue;
 import com.tk.match.slot.MatchSlot;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;

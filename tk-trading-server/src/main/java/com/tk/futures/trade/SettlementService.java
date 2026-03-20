@@ -1,4 +1,4 @@
-package com.tk.futures.settlement;
+package com.tk.futures.trade;
 
 import com.tk.futures.model.UserTradingBook;
 import com.tk.protocol.dto.TradingSettle;
@@ -11,9 +11,9 @@ import org.springframework.stereotype.Service;
  * 当前实现仅完成结构与入口，具体业务计算可在后续迭代中补充。
  */
 @Service
-public class SettlementEngine {
+public class SettlementService {
 
-    private static final Logger logger = LoggerFactory.getLogger(SettlementEngine.class);
+    private static final Logger logger = LoggerFactory.getLogger(SettlementService.class);
 
     /**
      * 在给定的 UserTradingBook 上应用撮合结算结果，并将需要持久化的变更追加到 items 中。

@@ -1,7 +1,7 @@
 package com.tk.match.config;
 
 import com.tk.match.ha.MatchLeaderElectionService;
-import com.tk.match.queue.MatchResultMasterFileQueue;
+import com.tk.match.compare.MatchResultMasterFileQueue;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;

@@ -29,26 +29,17 @@ public class TradingResultConsumer {
     private volatile boolean running = false;
     private Thread consumerThread;
 
-    public TradingResultConsumer(@Value("${kafka.servers}") String servers, @Value("${shard.name}") String shardName) {
+    public TradingResultConsumer(@Value("${kafka.servers}") String servers, @Value("${shard.id}") String shard) {
         props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, servers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "trading-result-" + shardName);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "trading-result-" + shard);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
-        topic = KafkaTopic.TRADING_RESULT + shardName;
+        topic = KafkaTopic.TRADING_RESULT + shard;
     }
 
     @PostConstruct
-    public void init() {
-        start();
-    }
-
-    @PreDestroy
-    public void destroy() {
-        stop();
-    }
-
     public void start() {
         if (running) return;
         running = true;
@@ -68,7 +59,8 @@ public class TradingResultConsumer {
         logger.info("TradingResultConsumer started topic={}", topic);
     }
 
-    public synchronized void stop() {
+    @PreDestroy
+    public void stop() {
         running = false;
         if (consumerThread != null) {
             consumerThread.interrupt();

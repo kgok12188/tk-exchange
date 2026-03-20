@@ -34,3 +34,7 @@ kafka:
 zookeeper:
   servers: 127.0.0.1:2182
 
+trading:
+  # Zookeeper 主从选举路径；多 shard 部署时请确保每个 shard 使用不同 path，避免互相抢主
+  leader-latch-path: "/trading-server/leader/g1"
+
