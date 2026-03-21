@@ -1,6 +1,6 @@
 package com.tk.futures.slot;
 
-import com.tk.futures.model.UserTradingBook;
+import com.tk.futures.model.TradingAccount;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -14,7 +14,7 @@ public class SlotContext {
 
     @Getter
     private final int slotIndex;
-    private final Map<Long, UserTradingBook> booksByUid = new ConcurrentHashMap<>();
+    private final Map<Long, TradingAccount> booksByUid = new ConcurrentHashMap<>();
 
     @Setter
     @Getter
@@ -24,15 +24,19 @@ public class SlotContext {
     @Getter
     private long pushOffset;
 
+    @Setter
+    @Getter
+    private long comparedFileOffset;
+
     public SlotContext(int slotIndex) {
         this.slotIndex = slotIndex;
     }
 
-    public UserTradingBook createBook(Long uid) {
-        return booksByUid.computeIfAbsent(uid, id -> new UserTradingBook(id, new java.util.LinkedList<>(), new java.util.LinkedList<>()));
+    public TradingAccount createBook(Long uid) {
+        return booksByUid.computeIfAbsent(uid, id -> new TradingAccount(id, new java.util.LinkedList<>(), new java.util.LinkedList<>()));
     }
 
-    public UserTradingBook getBook(Long uid) {
+    public TradingAccount getBook(Long uid) {
         return booksByUid.get(uid);
     }
 

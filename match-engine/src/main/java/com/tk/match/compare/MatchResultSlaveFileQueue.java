@@ -83,16 +83,24 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
         }
     }
 
+
     /**
-     * 补发：从该 symbol 的文件队列顺序读取，将 orderReqOffset &gt; minOrderReqOffsetExclusive 的记录交给 consumer（payload, orderReqOffset）。
-     * 用于从晋升为主后，将未写入 Kafka 的 MatchResponse 按序发往 Kafka。
+     * 避免每次切主都从队列物理头开始扫描（起点由 ComparedEvent 解析的 {@code comparedFileQueueStartIndex} 提供）。
      */
-    public void replay(String symbol, long minOrderReqOffsetExclusive, BiConsumer<String, Long> consumer) {
+    public void replay(String symbol, long minOrderReqOffsetExclusive, long startIndexHint, BiConsumer<String, Long> consumer) {
         if (symbol == null || consumer == null || closed) return;
         SingleChronicleQueue q = queuesBySymbol.get(symbol);
         if (q == null) return;
         try {
             ExcerptTailer tail = q.createTailer();
+            if (startIndexHint >= 0) {
+                if (!tail.moveToIndex(startIndexHint)) {
+                    log.warn("MatchResultSlaveFileQueue replay moveToIndex({}) failed symbol={} fallback toStart", startIndexHint, symbol);
+                    tail.toStart();
+                }
+            } else {
+                tail.toStart();
+            }
             while (true) {
                 try (DocumentContext dc = tail.readingDocument()) {
                     if (!dc.isPresent()) break;

@@ -53,7 +53,7 @@ public class TradingLeaderElectionService {
         if (zookeeperServers == null || zookeeperServers.isBlank() || leaderLatchPath == null || leaderLatchPath.isBlank()) {
             log.warn("trading-server leader election disabled: zookeeper.servers/leader-latch-path not configured");
             // 默认先作为从节点，不写 Kafka
-            waitSlotManagerStartedAndBroadcast(false);
+            waitSlotManagerStartedAndBroadcast(true);
             return;
         }
 
@@ -120,7 +120,7 @@ public class TradingLeaderElectionService {
                 return;
             }
             try {
-                Thread.sleep(100);
+                Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;

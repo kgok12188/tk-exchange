@@ -9,8 +9,9 @@ import com.tk.futures.inbound.CommandMessage;
 import com.tk.futures.result.ResponsePublisher;
 import com.tk.futures.result.ResultPublisher;
 import com.tk.futures.result.TradingResultSlaveFileQueue;
-import com.tk.futures.trade.SettlementService;
-import com.tk.futures.trade.UserCommandHandler;
+import com.tk.futures.trade.CancelOrderHandler;
+import com.tk.futures.trade.MatchResultHandler;
+import com.tk.futures.trade.NewOrderHandler;
 import com.tx.common.enums.TradingCommand;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -40,25 +41,23 @@ public class SettlementSlotManager {
      */
     public static final int SLOTS = 4;
 
-    private final List<Disruptor<CommandMessageEvent>> disruptors = new ArrayList<>(SLOTS);
+    private final List<Disruptor<CommandMessageEvent>> disrupts = new ArrayList<>(SLOTS);
     private final List<RingBuffer<CommandMessageEvent>> ringBuffers = new ArrayList<>(SLOTS);
-    private final List<SlotContext> slotContexts = new ArrayList<>(SLOTS);
 
-    private final SettlementService settlementService;
-    private final UserCommandHandler userCommandHandler;
+    private final MatchResultHandler matchResultHandler;
+    private final NewOrderHandler newOrderHandler;
     private final ResultPublisher resultPublisher;
     private final ResponsePublisher responsePublisher;
     private final TradingResultSlaveFileQueue slaveFileQueue;
     private final TradingResultTailQueryService tradingResultTailQueryService;
 
-    public SettlementSlotManager(SettlementService settlementService,
-                                 UserCommandHandler userCommandHandler,
-                                 ResultPublisher resultPublisher,
-                                 ResponsePublisher responsePublisher,
-                                 TradingResultSlaveFileQueue slaveFileQueue,
-                                 TradingResultTailQueryService tradingResultTailQueryService) {
-        this.settlementService = settlementService;
-        this.userCommandHandler = userCommandHandler;
+    private final CancelOrderHandler cancelOrderHandler;
+
+    public SettlementSlotManager(MatchResultHandler matchResultHandler, NewOrderHandler newOrderHandler, ResultPublisher resultPublisher, CancelOrderHandler cancelOrderHandler,
+                                 ResponsePublisher responsePublisher, TradingResultSlaveFileQueue slaveFileQueue, TradingResultTailQueryService tradingResultTailQueryService) {
+        this.matchResultHandler = matchResultHandler;
+        this.newOrderHandler = newOrderHandler;
+        this.cancelOrderHandler = cancelOrderHandler;
         this.resultPublisher = resultPublisher;
         this.responsePublisher = responsePublisher;
         this.slaveFileQueue = slaveFileQueue;
@@ -69,14 +68,17 @@ public class SettlementSlotManager {
     public void start() {
         for (int i = 0; i < SLOTS; i++) {
             SlotContext state = new SlotContext(i);
-            slotContexts.add(state);
             int slotIndex = i;
             int bufferSize = 1024;
-            ThreadFactory threadFactory = r -> new Thread(r, "settlement-slot-" + slotIndex);
+            ThreadFactory threadFactory = r -> {
+                Thread thread = new Thread(r, "settlement-slot-" + slotIndex);
+                thread.setDaemon(true);
+                return thread;
+            };
             Disruptor<CommandMessageEvent> disruptor = new Disruptor<>(CommandMessageEvent.FACTORY, bufferSize, threadFactory, ProducerType.MULTI, new BlockingWaitStrategy());
-            disruptor.handleEventsWith(new SettlementEventHandler(slotIndex, state, settlementService, userCommandHandler, resultPublisher, responsePublisher, slaveFileQueue));
+            disruptor.handleEventsWith(new SettlementEventHandler(slotIndex, state, matchResultHandler, newOrderHandler, cancelOrderHandler, resultPublisher, responsePublisher, slaveFileQueue));
             disruptor.start();
-            disruptors.add(disruptor);
+            disrupts.add(disruptor);
             ringBuffers.add(disruptor.getRingBuffer());
         }
         logger.info("SettlementSlotManager started with {} slots", SLOTS);
@@ -85,7 +87,7 @@ public class SettlementSlotManager {
 
     @PreDestroy
     public void stop() {
-        for (Disruptor<CommandMessageEvent> disruptor : disruptors) {
+        for (Disruptor<CommandMessageEvent> disruptor : disrupts) {
             disruptor.shutdown();
         }
         logger.info("SettlementSlotManager stopped");
@@ -104,9 +106,9 @@ public class SettlementSlotManager {
      * 提交带 uid 的用户指令。
      */
     public void submitUserCommand(CommandMessage message) {
-        Long uid = message.getUid();
+        Long uid = message.uid();
         if (uid == null || uid <= 0) {
-            logger.warn("skip user command without valid uid, command={}, uid={}", message.getCommand(), uid);
+            logger.warn("skip user command without valid uid, command={}, uid={}", message.command(), uid);
             return;
         }
         int slotIndex = slot(uid);
@@ -133,10 +135,7 @@ public class SettlementSlotManager {
                 // 让从节点文件 replay 时只补发 record.offset > lastOffset，避免重复写 Kafka。
                 offset = tradingResultTailQueryService.queryLastOffset(i);
             }
-            publishToRingBuffer(ringBuffers.get(i),
-                    new CommandMessage(null,
-                            isMaster ? TradingCommand.MASTER.name() : TradingCommand.SLAVE.name(),
-                            null, null, offset));
+            publishToRingBuffer(ringBuffers.get(i), new CommandMessage(null, isMaster ? TradingCommand.MASTER.name() : TradingCommand.SLAVE.name(), null, null, offset));
         }
     }
 
@@ -154,11 +153,7 @@ public class SettlementSlotManager {
     @Scheduled(fixedDelay = 100, initialDelay = 1000)
     public void check() {
         if (started) {
-            if (resultPublisher.getCount() > 0) {
-                for (int i = 0; i < SLOTS; i++) {
-                    publishToRingBuffer(ringBuffers.get(i), new CommandMessage(null, TradingCommand.CHECK.name(), null, null, 0));
-                }
-            }
+            resultPublisher.check(i -> publishToRingBuffer(ringBuffers.get(i), new CommandMessage(null, TradingCommand.CHECK.name(), null, null, 0)));
         }
     }
 

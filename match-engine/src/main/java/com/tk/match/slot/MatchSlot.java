@@ -12,6 +12,7 @@ import com.tk.match.engine.MatchEngine;
 import com.tk.match.engine.OrderBook;
 import com.tk.match.engine.OrderCommandEnvelope;
 import com.tk.match.service.MatchResultTailQueryService;
+import com.tk.match.slot.event.*;
 import com.tk.match.snapshot.SnapshotFileHelper;
 import com.tk.match.snapshot.SnapshotLoadResult;
 import com.tk.protocol.ProtocolSerde;
@@ -120,6 +121,25 @@ public class MatchSlot {
      */
     public void becameMaster() {
         pendingSlotEvents.add(SlotEvent.becameMaster());
+    }
+
+
+    /**
+     * 由比对/对齐服务回调：更新该 symbol 在 OrderBook 上的 comparedFileOffset，切主补发文件队列时从此对齐点之后开始。
+     */
+    public void updateComparedOffset(String symbol, long comparedOffset) {
+        updateComparedOffset(symbol, comparedOffset, -1L);
+    }
+
+    /**
+     * @param slaveQueueStartIndex slave Chronicle 已对齐末尾索引；无则 -1
+     */
+    public void updateComparedOffset(String symbol, long comparedOffset, long slaveQueueStartIndex) {
+        if (symbol == null || symbol.isEmpty()) return;
+        pendingSlotEvents.add(SlotEvent.comparedOffset(symbol, comparedOffset, slaveQueueStartIndex));
+        synchronized (waitSymbolLock) {
+            waitSymbolLock.notifyAll();
+        }
     }
 
     public void becameSlave() {
@@ -290,7 +310,7 @@ public class MatchSlot {
     /**
      * 单生产者：仅 consumeLoop 线程调用，将事件写入 Disruptor。
      */
-    private void publishToRingBuffer(SlotTaskEvent.Type type, String symbol, HaEvent haEvent) {
+    private void publishToRingBuffer(SlotTaskEvent.Type type, String symbol, HaEvent haEvent, long comparedOffset) {
         if (ringBuffer == null) return;
         long seq = ringBuffer.next();
         try {
@@ -315,16 +335,25 @@ public class MatchSlot {
                 if (symbol != null && !symbol.isEmpty()) {
                     MatchEngine engine = enginesBySymbol.putIfAbsent(symbol, new MatchEngine(symbol));
                     if (engine == null && add.getInitialMasterOffset() > 0) {
-                        enginesBySymbol.get(symbol).getBook().updateMasterOffsetIfGreater(add.getInitialMasterOffset());
+                        enginesBySymbol.get(symbol).getBook().updateMasterReqOffsetIfGreater(add.getInitialMasterOffset());
                     } else if (engine != null && add.getInitialMasterOffset() > 0) {
-                        engine.getBook().updateMasterOffsetIfGreater(add.getInitialMasterOffset());
+                        engine.getBook().updateMasterReqOffsetIfGreater(add.getInitialMasterOffset());
                     }
                     topicsToAdd.add(symbolToTopic(symbol));
                 }
             } else if (e instanceof HaEvent ha) {
-                publishToRingBuffer(SlotTaskEvent.Type.HA, null, ha);
+                publishToRingBuffer(SlotTaskEvent.Type.HA, null, ha, 0);
             } else if (e instanceof SnapshotEvent snapEv) {
-                publishToRingBuffer(SlotTaskEvent.Type.SNAPSHOT, snapEv.getSymbol(), null);
+                publishToRingBuffer(SlotTaskEvent.Type.SNAPSHOT, snapEv.symbol(), null, 0);
+            } else if (e instanceof ComparedEvent compared) {
+                if (ringBuffer != null) {
+                    long seq = ringBuffer.next();
+                    try {
+                        ringBuffer.get(seq).setMoveCompareOffset(compared.symbol(), compared.offset(), compared.slaveQueueStartIndex());
+                    } finally {
+                        ringBuffer.publish(seq);
+                    }
+                }
             }
         }
         if (!topicsToAdd.isEmpty()) {
@@ -346,20 +375,22 @@ public class MatchSlot {
             OrderBook book = engine.getBook();
             long tailOffset = tailOffsets.getOrDefault(symbol, 0L);
             if (tailOffset > 0) {
-                book.updateMasterOffsetIfGreater(tailOffset);
+                book.updateMasterReqOffsetIfGreater(tailOffset);
             }
-            long masterOffset = book.getMasterOffset();
+            long minExclusive = Math.max(book.getMasterReqOffset(), book.getComparedFileOffset());
+            long replayHint = book.getComparedFileQueueStartIndex();
             String matchResultTopic = matchResultTopic(symbol);
-            log.info("MatchSlot index={} replaying from file queue symbol={} masterOffset={} (queried tail={})", index, symbol, masterOffset, tailOffset);
-            fileQueueWriter.replay(symbol, masterOffset, (payload, orderReqOffset) -> {
+            log.info("MatchSlot index={} replay file queue symbol={} minExclusive={} replayStartIndexHint={}", index, symbol, minExclusive, replayHint);
+            fileQueueWriter.replay(symbol, minExclusive, replayHint, (payload, orderReqOffset) -> {
                 try {
                     producer.send(matchResultRecord(matchResultTopic, symbol, orderReqOffset, payload)).get(10, TimeUnit.SECONDS);
-                    engine.getBook().updateMasterOffsetIfGreater(orderReqOffset);
+                    engine.getBook().updateMasterReqOffsetIfGreater(orderReqOffset);
                 } catch (Exception ex) {
                     log.error("MatchSlot replay failed symbol={} orderReqOffset={} slot={}", symbol, orderReqOffset, index, ex);
                 }
             });
             fileQueueWriter.clear(symbol);
+            book.setComparedFileQueueStartIndex(-1L);
         }
         log.info("MatchSlot index={} BECAME_MASTER replay completed", index);
     }
@@ -394,6 +425,14 @@ public class MatchSlot {
                         isMaster = false;
                     }
                 }
+                case MOVE_COMPARE_OFFSET -> {
+                    MatchEngine engine = enginesBySymbol.get(event.getSymbol());
+                    if (engine != null) {
+                        OrderBook book = engine.getBook();
+                        book.setComparedFileOffset(event.getCompareOffset());
+                        book.setComparedFileQueueStartIndex(event.getCompareQueueIndex());
+                    }
+                }
                 case START -> startLatch.countDown();
                 default -> {
 
@@ -418,6 +457,7 @@ public class MatchSlot {
         Collection<com.tk.match.engine.BookOrder> orders = book.exportOrders();
         try {
             SnapshotFileHelper.write(snapshotDir, symbol, offset, orders);
+            book.setSnapshotOffset(offset);
             log.info("snapshot completed symbol={} offset={}", symbol, offset);
         } catch (Exception e) {
             log.error("MatchSlot snapshot write failed symbol={} slot={}", symbol, index, e);
@@ -451,12 +491,12 @@ public class MatchSlot {
             if (isMaster) {
                 String matchResultTopic = matchResultTopic(symbol);
                 OrderBook book = engine.getBook();
-                if (book.getMasterOffset() < orderReqOffset) {
+                if (book.getMasterReqOffset() < orderReqOffset) {
                     producer.send(matchResultRecord(matchResultTopic, symbol, orderReqOffset, out), (m, ex) -> {
                         if (ex != null) {
                             log.error("MatchSlot send error symbol={} slot={}", symbol, index, ex);
                         } else {
-                            book.updateMasterOffsetIfGreater(orderReqOffset);
+                            book.updateMasterReqOffsetIfGreater(orderReqOffset);
                         }
                     });
                 }

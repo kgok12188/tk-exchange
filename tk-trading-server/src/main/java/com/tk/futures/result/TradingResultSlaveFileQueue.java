@@ -103,9 +103,9 @@ public class TradingResultSlaveFileQueue {
             // 为避免 replay 过程中仍被写入：replay 在 slot 线程内执行，正常情况下不会并发 append 同一 slot。
             try {
                 SingleChronicleQueue queue = queuesBySlot.computeIfAbsent(slotIndex, this::createSlotQueue);
-                ExcerptTailer tailer = queue.createTailer();
+                ExcerptTailer tail = queue.createTailer();
                 while (true) {
-                    try (DocumentContext dc = tailer.readingDocument()) {
+                    try (DocumentContext dc = tail.readingDocument()) {
                         if (!dc.isPresent()) break;
                         long recordOffset = Objects.requireNonNull(dc.wire()).read().int64();
                         long uid = Objects.requireNonNull(dc.wire()).read().int64();

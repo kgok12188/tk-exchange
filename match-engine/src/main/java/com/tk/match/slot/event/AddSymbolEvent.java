@@ -1,4 +1,4 @@
-package com.tk.match.slot;
+package com.tk.match.slot.event;
 
 import lombok.Getter;
 

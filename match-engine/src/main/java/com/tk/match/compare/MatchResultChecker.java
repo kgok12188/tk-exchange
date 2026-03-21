@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 验证从节点自身产出的 MatchResponse（baseDir/slave）与从 Kafka 消费到的主节点产出（baseDir/master）
  * 在相同 orderReqOffset 下内容一致。以 orderReqOffset 对齐，取最后一条得 lastSlave、lastMaster，
  * end = min(lastSlave, lastMaster)，在 (end - N, end] 内倒推 N 条逐条比较 payload；不一致或缺失打 error 日志。
- * 仅读队列，不修改队列与主从状态。
+ * 抽样全部一致时通过 {@link MatchManager#updateComparedProgressFromConsistencyCheck} 更新 OrderBook 对齐进度（不写 Chronicle 文件）。
  * <p>
  * 仅当 match.consistencyCheckEnabled=true、match.fileQueueDir 非空且当前为从节点时执行。
  */
@@ -124,26 +124,36 @@ public class MatchResultChecker {
         Set<Long> allOffsets = new HashSet<>();
         allOffsets.addAll(slaveMap.keySet());
         allOffsets.addAll(masterMap.keySet());
+        if (allOffsets.isEmpty()) {
+            return;
+        }
         int count = 0;
+        boolean allMatch = true;
         for (Long orderReqOffset : allOffsets) {
             String slavePayload = slaveMap.get(orderReqOffset);
             String masterPayload = masterMap.get(orderReqOffset);
             if (slavePayload == null) {
                 log.error("StateMachineConsistencyCheck symbol={} orderReqOffset={} missing in slave (present in master)", symbol, orderReqOffset);
+                allMatch = false;
                 continue;
             }
             if (masterPayload == null) {
                 log.error("StateMachineConsistencyCheck symbol={} orderReqOffset={} missing in master (present in slave)", symbol, orderReqOffset);
+                allMatch = false;
                 continue;
             }
             if (!slavePayload.equals(masterPayload)) {
                 String diff = diffSummary(slavePayload, masterPayload);
                 log.error("StateMachineConsistencyCheck symbol={} orderReqOffset={} payload mismatch: {}", symbol, orderReqOffset, diff);
+                allMatch = false;
             } else {
                 count++;
             }
         }
-        log.info("StateMachineConsistencyCheck symbol={} checked {} records", symbol, count);
+        log.info("StateMachineConsistencyCheck symbol={} checked {} records allMatch={}", symbol, count, allMatch);
+        if (allMatch) {
+            matchManager.updateComparedProgressFromConsistencyCheck(symbol, end, effectiveSlaveIdx);
+        }
     }
 
     /**

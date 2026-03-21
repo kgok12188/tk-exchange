@@ -21,9 +21,9 @@ public class TradingCommandRouter implements CommandRouter {
 
     @Override
     public void route(CommandMessage message) {
-        String command = message.getCommand();
+        String command = message.command();
         if (command == null || command.isEmpty()) {
-            logger.warn("skip message without command, uid={}, offset={}", message.getUid(), message.getOffset());
+            logger.warn("skip message without command, uid={}, offset={}", message.uid(), message.offset());
             return;
         }
         switch (command) {

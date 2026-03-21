@@ -11,7 +11,7 @@ import java.util.function.Consumer;
 
 
 @Data
-public class UserTradingBook {
+public class TradingAccount {
 
     private Long uid;
     private Map<Long, Order> orders = new LinkedHashMap<>();
@@ -26,7 +26,7 @@ public class UserTradingBook {
 
     private static final String USDT = "USDT";
 
-    public UserTradingBook(Long uid, List<Order> orders, List<Account> accounts) {
+    public TradingAccount(Long uid, List<Order> orders, List<Account> accounts) {
         this.uid = uid;
         for (Order order : orders) {
             this.orders.put(order.getId(), order);
@@ -46,7 +46,7 @@ public class UserTradingBook {
      */
     private Account getAccountByCoinName() {
         for (Account a : changeAccounts.values()) {
-            if (Objects.equals(a.getCoinName(), UserTradingBook.USDT)) {
+            if (Objects.equals(a.getCoinName(), TradingAccount.USDT)) {
                 return a;
             }
         }
@@ -54,7 +54,7 @@ public class UserTradingBook {
             if (removeAccountIds.contains(a.getId())) {
                 continue;
             }
-            if (Objects.equals(a.getCoinName(), UserTradingBook.USDT)) {
+            if (Objects.equals(a.getCoinName(), TradingAccount.USDT)) {
                 return a;
             }
         }

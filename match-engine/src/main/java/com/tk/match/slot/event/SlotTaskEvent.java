@@ -1,4 +1,4 @@
-package com.tk.match.slot;
+package com.tk.match.slot.event;
 
 import lombok.Getter;
 import lombok.Setter;
@@ -12,13 +12,18 @@ import lombok.Setter;
 @Getter
 public final class SlotTaskEvent {
 
-    public enum Type {ORDER, SNAPSHOT, HA, START}
+    public enum Type {ORDER, SNAPSHOT, HA, START, MOVE_COMPARE_OFFSET}
 
     private Type type;
     private String symbol;
     private String rawJson;
     private long orderReqOffset;
     private HaEvent haEvent;
+    private long compareOffset;
+    /**
+     * Chronicle 读起点；-1 表示未带索引
+     */
+    private long compareQueueIndex = -1L;
 
     public void setOrder(String symbol, String rawJson, long orderReqOffset) {
         this.type = Type.ORDER;
@@ -40,6 +45,18 @@ public final class SlotTaskEvent {
         this.symbol = null;
         this.rawJson = null;
         this.haEvent = haEvent;
+    }
+
+
+    public void setComparedOffset(String symbol, String rawJson, long compareOffset) {
+        setMoveCompareOffset(symbol, compareOffset, -1L);
+    }
+
+    public void setMoveCompareOffset(String symbol, long compareOffset, long compareQueueIndex) {
+        this.type = Type.MOVE_COMPARE_OFFSET;
+        this.symbol = symbol;
+        this.compareOffset = compareOffset;
+        this.compareQueueIndex = compareQueueIndex;
     }
 
     public void setStart() {

@@ -3,12 +3,13 @@ package com.tk.futures.slot;
 import com.alibaba.fastjson2.JSON;
 import com.lmax.disruptor.EventHandler;
 import com.tk.futures.inbound.CommandMessage;
-import com.tk.futures.model.UserTradingBook;
+import com.tk.futures.model.TradingAccount;
 import com.tk.futures.result.ResponsePublisher;
 import com.tk.futures.result.ResultPublisher;
 import com.tk.futures.result.TradingResultSlaveFileQueue;
-import com.tk.futures.trade.SettlementService;
-import com.tk.futures.trade.UserCommandHandler;
+import com.tk.futures.trade.CancelOrderHandler;
+import com.tk.futures.trade.MatchResultHandler;
+import com.tk.futures.trade.NewOrderHandler;
 import com.tk.protocol.dto.TradingSettle;
 import com.tk.protocol.dto.UserCommandResult;
 import com.tx.common.enums.TradingCommand;
@@ -24,8 +25,9 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
 
     private final int slotIndex;
     private final SlotContext slotContext;
-    private final SettlementService settlementService;
-    private final UserCommandHandler userCommandHandler;
+    private final MatchResultHandler matchResultHandler;
+    private final NewOrderHandler newOrderHandler;
+    private final CancelOrderHandler cancelOrderHandler;
     private final ResultPublisher resultPublisher;
     private final ResponsePublisher responsePublisher;
     private final TradingResultSlaveFileQueue slaveFileQueue;
@@ -34,15 +36,17 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
 
     public SettlementEventHandler(int slotIndex,
                                   SlotContext slotContext,
-                                  SettlementService settlementService,
-                                  UserCommandHandler userCommandHandler,
+                                  MatchResultHandler matchResultHandler,
+                                  NewOrderHandler newOrderHandler,
+                                  CancelOrderHandler cancelOrderHandler,
                                   ResultPublisher resultPublisher,
                                   ResponsePublisher responsePublisher,
                                   TradingResultSlaveFileQueue slaveFileQueue) {
         this.slotIndex = slotIndex;
         this.slotContext = slotContext;
-        this.settlementService = settlementService;
-        this.userCommandHandler = userCommandHandler;
+        this.matchResultHandler = matchResultHandler;
+        this.newOrderHandler = newOrderHandler;
+        this.cancelOrderHandler = cancelOrderHandler;
         this.resultPublisher = resultPublisher;
         this.responsePublisher = responsePublisher;
         this.slaveFileQueue = slaveFileQueue;
@@ -54,15 +58,15 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
             return;
         }
         CommandMessage message = event.getMessage();
-        if (message.getCommand() == null) {
+        if (message.command() == null) {
             return;
         }
-        TradingCommand command = TradingCommand.ofValue(message.getCommand());
+        TradingCommand command = TradingCommand.ofValue(message.command());
         if (command == TradingCommand.MASTER) {
             boolean old = isMaster;
             isMaster = true;
             if (!old) {
-                long minOffsetExclusive = message.getOffset(); // last kafka offset
+                long minOffsetExclusive = message.offset(); // last kafka offset
                 // 先把进度推进到 lastOffset：如果没有需要补发的记录，不会卡在 0。
                 slotContext.setPushOffset(Math.max(slotContext.getPushOffset(), minOffsetExclusive));
                 // 切主后，把从节点累计的文件队列补发到 Kafka
@@ -80,25 +84,31 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
                 resultPublisher.flush(slotIndex);
             }
         } else {
-            long offset = event.getMessage().getOffset();
+            long offset = event.getMessage().offset();
             if (slotContext.offsetIfGreaterThanCurrent(offset)) {
-                Long uid = message.getUid();
+                Long uid = message.uid();
                 if (uid == null || uid <= 0) {
                     return;
                 }
-                UserTradingBook tradingBook = slotContext.getBook(uid);
+                TradingAccount tradingBook = slotContext.getBook(uid);
                 if (tradingBook == null) {
                     return;
                 }
                 try {
                     if (command == TradingCommand.MATCH) {
                         // 结算结果：在 Book 上应用变更，并将需要持久化的记录追加到 events（通过 commit 的 consumer 回传）
-                        settlementService.handle(uid, message.getData().toJavaObject(TradingSettle.class), tradingBook);
-                    } else {
+                        matchResultHandler.handle(uid, message.data().toJavaObject(TradingSettle.class), tradingBook);
+                    } else if (command == TradingCommand.NEW_ORDER) {
                         // 非撮合指令：更新内存状态 + 产生给 open-api 的业务响应
-                        UserCommandResult result = userCommandHandler.handle(command, message.getData(), tradingBook);
+                        UserCommandResult result = newOrderHandler.handle(command, message.data(), tradingBook);
                         if (result != null) {
-                            responsePublisher.publish(message.getReqId(), result);
+                            responsePublisher.publish(message.reqId(), result);
+                        }
+                    } else if (command == TradingCommand.CANCEL_ORDER) {
+                        // 非撮合指令：更新内存状态 + 产生给 open-api 的业务响应
+                        UserCommandResult result = cancelOrderHandler.handle(command, message.data(), tradingBook);
+                        if (result != null) {
+                            responsePublisher.publish(message.reqId(), result);
                         }
                     }
                     if (isMaster) {
@@ -113,7 +123,6 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
                         tradingBook.commit(events -> {
                             String payloadJson = JSON.toJSONString(events);
                             slaveFileQueue.append(slotIndex, offset, uid, payloadJson);
-                            slotContext.setPushOffset(Math.max(slotContext.getPushOffset(), offset));
                         });
                     }
                 } catch (Exception e) {
@@ -121,7 +130,7 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
                     log.error("handle command error", e);
                     tradingBook.rollback();
                     if (command == TradingCommand.MATCH) {
-                        tradingBook.addTradingSettle(slotContext.getOffset(), message.getData().toJavaObject(TradingSettle.class));
+                        tradingBook.addTradingSettle(slotContext.getOffset(), message.data().toJavaObject(TradingSettle.class));
                     }
                 }
             }

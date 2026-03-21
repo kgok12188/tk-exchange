@@ -41,18 +41,33 @@ public final class OrderBook {
     private long reqOffset;
 
     @Getter
-    private volatile long masterOffset;
+    private volatile long masterReqOffset;
+
+    /**
+     * 比对服务报告的 order_req 对齐进度（exclusive 语义与 {@link com.tk.match.compare.MatchResultSlaveFileQueue#replay} 的 min 一致）。
+     * 由 {@link com.tk.match.slot.event.ComparedEvent} 经 Disruptor 更新；切主时与 Kafka 尾部取较大值作为文件队列补发起始。
+     */
+    @Setter
+    @Getter
+    private transient long comparedFileOffset;
+
+    /**
+     * 从节点 slave Chronicle 上已比对对齐到的文档索引（供切主补发 {@link com.tk.match.compare.MatchResultSlaveFileQueue#replay} 的 startIndexHint）；-1 表示未设置。
+     */
+    @Setter
+    @Getter
+    private transient long comparedFileQueueStartIndex = -1L;
 
     @Getter
     @Setter
-    private long snapshotOffset;
+    private transient long snapshotOffset;
 
     /**
      * 仅当 {@code orderReqOffset} 大于当前 masterOffset 时更新，避免回退。线程安全。
      */
-    public void updateMasterOffsetIfGreater(long orderReqOffset) {
-        if (orderReqOffset > masterOffset) {
-            masterOffset = orderReqOffset;
+    public void updateMasterReqOffsetIfGreater(long masterReqOffset) {
+        if (this.masterReqOffset < masterReqOffset) {
+            this.masterReqOffset = masterReqOffset;
         }
     }
 

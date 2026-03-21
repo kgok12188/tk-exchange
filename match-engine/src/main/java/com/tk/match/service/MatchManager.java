@@ -141,6 +141,17 @@ public class MatchManager {
     }
 
     /**
+     * 主从文件队列一致性抽样全部通过后，更新 OrderBook 的 comparedFileOffset（{@code comparedOrderReqOffset}，一般为 min(slave,master) 尾部）
+     * 与 slave Chronicle 末尾索引 {@code slaveQueueStartIndex}（{@link com.tk.match.compare.MatchResultChecker} 中的 effectiveSlaveIdx）。
+     */
+    public void updateComparedProgressFromConsistencyCheck(String symbol, long comparedOrderReqOffset, long slaveQueueStartIndex) {
+        if (symbol == null || symbol.isEmpty() || slots == null) return;
+        int k = slotIndex(symbol);
+        if (k < 0 || k >= slots.size()) return;
+        slots.get(k).updateComparedOffset(symbol, comparedOrderReqOffset, slaveQueueStartIndex);
+    }
+
+    /**
      * 切主后由 ZK 选主回调（或 HaStatus watcher）在 {@code HaStatus.setMaster(true)} 之后调用，
      * 向每个 MatchSlot 投递 BECAME_MASTER，consumeLoop 将执行文件队列补发。
      */

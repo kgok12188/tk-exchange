@@ -1,4 +1,4 @@
-package com.tk.match.slot;
+package com.tk.match.slot.event;
 
 /**
  * 待处理 slot 事件：由 consumeLoop 在 poll 前 drain 并处理；ORDER/SNAPSHOT/HA 由同一线程转发到 Disruptor（单生产者）。
@@ -25,11 +25,13 @@ public interface SlotEvent {
         return HaEvent.SLAVE;
     }
 
-    static SlotEvent order(String symbol, String rawJson, long orderReqOffset) {
-        return new OrderSlotEvent(symbol, rawJson, orderReqOffset);
-    }
 
     static SlotEvent snapshot(String symbol) {
         return new SnapshotEvent(symbol);
     }
+
+    static SlotEvent comparedOffset(String symbol, long comparedOffset, long slaveQueueStartIndex) {
+        return new ComparedEvent(symbol, comparedOffset, slaveQueueStartIndex);
+    }
+
 }

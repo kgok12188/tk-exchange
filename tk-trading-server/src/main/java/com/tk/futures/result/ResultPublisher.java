@@ -45,6 +45,7 @@ public class ResultPublisher {
         // callback 线程向队列写、ringBuffer 线程向队列读，因此必须线程安全
         private final BlockingQueue<PendingRecord> pending = new LinkedBlockingQueue<>();
         private final AtomicBoolean faultMode = new AtomicBoolean(false);
+        private final AtomicBoolean drainStatus = new AtomicBoolean(false);
     }
 
     private static final class PendingRecord {
@@ -114,54 +115,59 @@ public class ResultPublisher {
     }
 
     private void drainPendingSync(PendingState state, int partition, long uid) {
-        // 无限重试直到队列耗尽；期间有新故障会不断入队，并继续 drain
-        while (true) {
-            PendingRecord pr = state.pending.poll();
-            if (pr == null) {
-                // 给 callback 线程一些时间把失败记录入队（避免竞争导致漏处理）
-                try {
-                    Thread.sleep(50);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-                // 再次判断：如果队列确实耗尽，则清掉 faultMode 并退出（恢复健康后再次走异步）
-                if (state.pending.isEmpty()) {
-                    state.faultMode.set(false);
-                    return;
-                }
-                continue;
-            }
-
+        state.drainStatus.set(true);
+        try {
+            // 无限重试直到队列耗尽；期间有新故障会不断入队，并继续 drain
             while (true) {
-                try {
-                    Future<?> f = kafkaProducer.send(pr.record);
-                    f.get(); // 等待 ACK，确保“最终成功才回调”
-                    if (pr.consumer != null) {
-                        pr.consumer.accept(null);
-                    }
-                    break;
-                } catch (Exception e) {
-                    logger.warn("ResultPublisher drain retry error, topicPartition={}, uid={}, err={}",
-                            partition, uid, e.getMessage());
+                PendingRecord pr = state.pending.poll();
+                if (pr == null) {
+                    // 给 callback 线程一些时间把失败记录入队（避免竞争导致漏处理）
                     try {
-                        Thread.sleep(100);
+                        Thread.sleep(50);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         return;
                     }
+                    // 再次判断：如果队列确实耗尽，则清掉 faultMode 并退出（恢复健康后再次走异步）
+                    if (state.pending.isEmpty()) {
+                        state.faultMode.set(false);
+                        return;
+                    }
+                    continue;
                 }
+
+                while (true) {
+                    try {
+                        Future<?> f = kafkaProducer.send(pr.record);
+                        f.get(); // 等待 ACK，确保“最终成功才回调”
+                        if (pr.consumer != null) {
+                            pr.consumer.accept(null);
+                        }
+                        break;
+                    } catch (Exception e) {
+                        logger.warn("ResultPublisher drain retry error, topicPartition={}, uid={}, err={}",
+                                partition, uid, e.getMessage());
+                        try {
+                            Thread.sleep(100);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                    }
+                }
+            }
+        } finally {
+            state.drainStatus.set(false);
+        }
+    }
+
+    public void check(Consumer<Integer> consumer) {
+        for (Integer i : pendingStateLocal.keySet()) {
+            if (!pendingStateLocal.get(i).drainStatus.get() && !pendingStateLocal.get(i).pending.isEmpty()) {
+                consumer.accept(i);
             }
         }
     }
 
-
-    public int getCount() {
-        int total = 0;
-        for (Integer i : pendingStateLocal.keySet()) {
-            total += pendingStateLocal.get(i).pending.size();
-        }
-        return total;
-    }
 }
 

@@ -1,4 +1,4 @@
-package com.tk.match.slot;
+package com.tk.match.slot.event;
 
 /**
  * 主从事件：consumeLoop 处理时 MASTER 执行补发（文件队列中 orderReqOffset &gt; masterOffset 的 payload 发往 Kafka），SLAVE 仅切换 isMaster。
