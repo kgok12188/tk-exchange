@@ -213,7 +213,7 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
                     }
                     continue;
                 }
-                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(2000));
+                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(10));
                 for (ConsumerRecord<String, String> record : records) {
                     long orderReqOffset = orderReqOffsetFromRecord(record);
                     if (orderReqOffset <= 0) {
@@ -241,7 +241,7 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
         }
     }
 
-    private void drainPendingEvents() {
+    private void drainPendingEvents() throws InterruptedException {
         SymbolEvent e;
         while ((e = pendingEvents.poll()) != null) {
             if (e.type == EventType.ADD) {
@@ -262,6 +262,10 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
                     consumer.assign(set);
                     log.info("MatchResultMasterFileQueue removed symbol={} assigned={}", e.symbol, set.size());
                 }
+            } else if (e.type == EventType.CLOSE) {
+                closeConsumedFileQueues();
+                log.info("MatchResultMasterFileQueue stopped");
+                throw new InterruptedException("MatchResultMasterFileQueue close");
             }
         }
     }
@@ -296,27 +300,7 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
     @Override
     public void close() {
         if (running.compareAndSet(true, false)) {
-            if (consumer != null) {
-                consumer.wakeup();
-            }
-            if (consumerThread != null) {
-                try {
-                    consumerThread.join(5000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                consumerThread = null;
-            }
-            if (consumer != null) {
-                try {
-                    consumer.close();
-                } catch (Exception e) {
-                    log.warn("MatchResultMasterFileQueue consumer close error", e);
-                }
-                consumer = null;
-            }
-            closeConsumedFileQueues();
-            log.info("MatchResultMasterFileQueue stopped");
+            pendingEvents.add(new SymbolEvent(EventType.CLOSE, ""));
         }
     }
 
@@ -368,7 +352,7 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
         return lastWriteBySymbol.get(symbol);
     }
 
-    private enum EventType {ADD, REMOVE}
+    private enum EventType {ADD, REMOVE, CLOSE}
 
     private static final class SymbolEvent {
         final EventType type;

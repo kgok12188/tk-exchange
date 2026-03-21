@@ -25,7 +25,7 @@ public class MatchLeaderElectionService {
     @Autowired
     private MatchManager matchManager;
 
-    private volatile boolean running;
+    private volatile boolean running = false;
     private CuratorFramework client;
     private LeaderLatch leaderLatch;
 
@@ -54,14 +54,17 @@ public class MatchLeaderElectionService {
             leaderLatch.addListener(new LeaderLatchListener() {
                 @Override
                 public void isLeader() {
+                    long startTime = System.nanoTime();
                     matchManager.notifyBecameMaster();
-                    log.info("match-engine became leader (latch path={})", latchPath);
+                    log.info("match-engine became leader (latch path={}),cost={}", latchPath, (System.nanoTime() - startTime) / 1000);
                 }
 
                 @Override
                 public void notLeader() {
-                    matchManager.notifyBecameSlave();
-                    log.info("match-engine lost leadership (latch path={})", latchPath);
+                    if (running) {
+                        matchManager.notifyBecameSlave();
+                        log.info("match-engine lost leadership (latch path={})", latchPath);
+                    }
                 }
             });
             leaderLatch.start();
@@ -75,7 +78,9 @@ public class MatchLeaderElectionService {
 
     @PreDestroy
     public void stop() {
+        log.info("match-engine leader election stopping");
         running = false;
+        matchManager.notifyClose();
         if (leaderLatch != null) {
             try {
                 leaderLatch.close();
@@ -91,9 +96,6 @@ public class MatchLeaderElectionService {
                 log.warn("CuratorFramework close error", e);
             }
             client = null;
-        }
-        if (matchManager != null) {
-            matchManager.notifyBecameSlave();
         }
         log.info("match-engine leader election stopped");
     }

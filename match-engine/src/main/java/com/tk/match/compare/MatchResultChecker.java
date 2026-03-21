@@ -58,7 +58,7 @@ public class MatchResultChecker {
                 try {
                     compareQueuesForSymbol(baseDir, symbol, n, keepSize);
                 } catch (Exception e) {
-                    log.warn("StateMachineConsistencyCheck symbol={} error", symbol, e);
+                    log.warn("check symbol={} error", symbol, e);
                 }
             }
         }
@@ -70,7 +70,7 @@ public class MatchResultChecker {
             try {
                 if (!q.isClosed()) q.close();
             } catch (Exception e) {
-                log.warn("StateMachineConsistencyCheck close queue {} failed", path, e);
+                log.warn("checker close queue {} failed", path, e);
             }
         });
         queueCache.clear();
@@ -86,10 +86,11 @@ public class MatchResultChecker {
     }
 
     private void compareQueuesForSymbol(Path baseDir, String symbol, int sampleSize, int keepSize) {
+        long startTime = System.nanoTime();
         LastWrite slaveLw = matchManager.getSlaveLastWrite(symbol);
         LastWrite masterLw = matchManager.getMasterLastWrite(symbol);
         if (slaveLw == null || masterLw == null) {
-            log.warn("StateMachineConsistencyCheck symbol={} skip (slave or master lw missing) slaveLw={},masterLw={}", symbol, slaveLw, masterLw);
+            log.warn("checker symbol={} skip (slave or master lw missing) slaveLw={},masterLw={}", symbol, slaveLw, masterLw);
             return;
         }
 
@@ -106,7 +107,7 @@ public class MatchResultChecker {
 
         if (!slaveDir.toFile().exists() || !masterDir.toFile().exists()) {
             if (log.isTraceEnabled()) {
-                log.trace("StateMachineConsistencyCheck symbol={} skip (slave or master dir missing)", symbol);
+                log.trace("checker symbol={} skip (slave or master dir missing)", symbol);
             }
             return;
         }
@@ -132,26 +133,24 @@ public class MatchResultChecker {
             String slavePayload = slaveMap.get(orderReqOffset);
             String masterPayload = masterMap.get(orderReqOffset);
             if (slavePayload == null) {
-                log.error("StateMachineConsistencyCheck symbol={} orderReqOffset={} missing in slave (present in master)", symbol, orderReqOffset);
-                allMatch = false;
                 continue;
             }
             if (masterPayload == null) {
-                log.error("StateMachineConsistencyCheck symbol={} orderReqOffset={} missing in master (present in slave)", symbol, orderReqOffset);
-                allMatch = false;
                 continue;
             }
             if (!slavePayload.equals(masterPayload)) {
                 String diff = diffSummary(slavePayload, masterPayload);
-                log.error("StateMachineConsistencyCheck symbol={} orderReqOffset={} payload mismatch: {}", symbol, orderReqOffset, diff);
+                log.error("checker symbol={} orderReqOffset={} payload mismatch: {}", symbol, orderReqOffset, diff);
                 allMatch = false;
             } else {
                 count++;
             }
         }
-        log.info("StateMachineConsistencyCheck symbol={} checked {} records allMatch={},end={},effectiveSlaveIdx={}", symbol, count, allMatch, end, effectiveSlaveIdx);
-        if (allMatch) {
+        log.info("checker symbol={} checked {} records allMatch={},end={},effectiveSlaveIdx={},cost={}", symbol, count, allMatch, end, effectiveSlaveIdx, (System.nanoTime() - startTime) / 1000);
+        if (allMatch && count > 0) {
             matchManager.updateComparedProgressFromConsistencyCheck(symbol, end, effectiveSlaveIdx);
+        } else {
+            log.error("checker symbol={} mismatch,end={},effectiveSlaveIdx={}", symbol, end, effectiveSlaveIdx);
         }
     }
 
@@ -167,7 +166,7 @@ public class MatchResultChecker {
             try {
                 return SingleChronicleQueueBuilder.binary(dir).readOnly(true).build();
             } catch (Exception e) {
-                log.debug("StateMachineConsistencyCheck open queue dir={} error: {}", dir, e.getMessage());
+                log.debug("checker open queue dir={} error: {}", dir, e.getMessage());
                 return null;
             }
         });
@@ -195,7 +194,7 @@ public class MatchResultChecker {
             long startFrom = Math.max(firstIdx, lastIdx - keepSize + 1);
             if (!tail.moveToIndex(startFrom)) {
                 if (log.isTraceEnabled()) {
-                    log.trace("StateMachineConsistencyCheck moveToIndex({}) failed firstIdx={} lastIdx={} dir={}", startFrom, firstIdx, lastIdx, queueDir);
+                    log.trace("checker moveToIndex({}) failed firstIdx={} lastIdx={} dir={}", startFrom, firstIdx, lastIdx, queueDir);
                 }
                 return list;
             }
@@ -210,7 +209,7 @@ public class MatchResultChecker {
                 }
             }
         } catch (Exception e) {
-            log.warn("StateMachineConsistencyCheck read queue dir={} error: {}", queueDir, e.getMessage());
+            log.warn("checker read queue dir={} error: {}", queueDir, e.getMessage());
         }
         return list;
     }

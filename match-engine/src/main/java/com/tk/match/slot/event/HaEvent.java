@@ -7,6 +7,7 @@ public final class HaEvent implements SlotEvent {
 
     public static final HaEvent MASTER = new HaEvent();
     public static final HaEvent SLAVE = new HaEvent();
+    public static final HaEvent CLOSE = new HaEvent();
 
     private HaEvent() {
     }

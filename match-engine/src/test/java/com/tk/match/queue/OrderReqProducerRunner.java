@@ -62,8 +62,8 @@ public class OrderReqProducerRunner {
         try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
             long baseOrderId = System.currentTimeMillis() % 1_000_000;
             long uid = 10001L;
-
-            for (int i = 0; i < count; i++) {
+            int i = 0;
+            while (i < 1000000) {
                 // 交替买卖、不同价格，便于产生成交
                 boolean buy = (i % 2 == 0);
                 BigDecimal price = BigDecimal.valueOf(60000 + (i % 10) * 100);
@@ -97,6 +97,8 @@ public class OrderReqProducerRunner {
                     }
                 });
                 future.get();
+                i++;
+                Thread.sleep(50);
             }
 
             // 可选：发一笔撤单（撤销最后一笔）

@@ -14,15 +14,12 @@ services:
     build:
       context: ..
       dockerfile: match-engine/Dockerfile
-    container_name: match-engine
-    ports:
-      - "${MATCH_ENGINE_HOST_PORT:-8092}:8092"
+    ## container_name: match-engine
+    # ports:
+      # - "${MATCH_ENGINE_HOST_PORT:-8092}:8092"
     environment:
       KAFKA_SERVERS: ${KAFKA_SERVERS:-kafka:9092}
       MATCH_ZOOKEEPER_SERVERS: ${MATCH_ZOOKEEPER_SERVERS:-zookeeper:2181}
-    volumes:
-      - "${MATCH_ENGINE_SNAPSHOT_DIR:-/tmp/match-engine-snapshot}:/tmp/match-engine-snapshot"
-      - "${MATCH_ENGINE_QUEUE_DIR:-/tmp/match-engine-queue}:/tmp/match-engine"
     restart: unless-stopped
 
 networks:

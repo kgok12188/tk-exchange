@@ -21,6 +21,10 @@ public interface SlotEvent {
         return HaEvent.SLAVE;
     }
 
+    static SlotEvent becameClose() {
+        return HaEvent.CLOSE;
+    }
+
 
     static SlotEvent snapshot(String symbol) {
         return new SnapshotEvent(symbol);

@@ -24,8 +24,10 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.internals.RecordHeader;
@@ -38,7 +40,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -228,21 +233,43 @@ public class MatchSlot {
         return book;
     }
 
+    /**
+     * KafkaConsumer 非线程安全：须在唯一使用它的 {@link #consumeLoop} 退出后再 {@link KafkaConsumer#close()}，
+     * 否则 Spring 关闭线程与 order-consumer 线程并发访问会触发 ConcurrentModificationException。
+     */
     public void stop() {
         if (running.compareAndSet(true, false)) {
             long startTime = System.currentTimeMillis();
+            Thread joinTarget = consumerThread;
             if (consumer != null) {
                 consumer.wakeup();
             }
             synchronized (waitSymbolLock) {
                 waitSymbolLock.notifyAll();
             }
-            if (consumerThread != null) {
-                consumerThread.interrupt();
-                consumerThread = null;
+            if (joinTarget != null) {
+                joinTarget.interrupt();
+                try {
+                    joinTarget.join(30_000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                if (joinTarget.isAlive()) {
+                    log.warn("MatchSlot order-consumer did not exit within 30s, index={}", index);
+                    try {
+                        joinTarget.join(10_000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
             }
+            consumerThread = null;
             if (consumer != null) {
-                consumer.close();
+                try {
+                    consumer.close();
+                } catch (Exception e) {
+                    log.warn("MatchSlot consumer close error index={}", index, e);
+                }
                 consumer = null;
             }
             if (disruptor != null) {
@@ -282,7 +309,7 @@ public class MatchSlot {
                     }
                     continue;
                 }
-                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(3000));
+                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(10));
                 for (ConsumerRecord<String, String> record : records) {
                     String topic = record.topic();
                     String symbol = topic.startsWith(ORDER_REQ_PREFIX) ? topic.substring(ORDER_REQ_PREFIX.length()) : topic;
@@ -292,7 +319,6 @@ public class MatchSlot {
                     } finally {
                         ringBuffer.publish(seq);
                     }
-
                 }
             } catch (org.apache.kafka.common.errors.WakeupException e) {
                 break;
@@ -342,7 +368,12 @@ public class MatchSlot {
                     topicsToAdd.add(symbolToTopic(symbol));
                 }
             } else if (e instanceof HaEvent ha) {
-                publishToRingBuffer(SlotTaskEvent.Type.HA, null, ha, 0);
+                if (ha == HaEvent.CLOSE) {
+                    running.set(false);
+                    throw new InterruptedException("MatchSlot HA close");
+                } else {
+                    publishToRingBuffer(SlotTaskEvent.Type.HA, null, ha, 0);
+                }
             } else if (e instanceof SnapshotEvent snapEv) {
                 publishToRingBuffer(SlotTaskEvent.Type.SNAPSHOT, snapEv.symbol(), null, 0);
             } else if (e instanceof ComparedEvent compared) {
@@ -380,16 +411,18 @@ public class MatchSlot {
             long minExclusive = Math.max(book.getMasterReqOffset(), book.getComparedFileOffset());
             long replayHint = book.getComparedFileQueueStartIndex();
             String matchResultTopic = matchResultTopic(symbol);
-            log.info("MatchSlot index={} replay file queue symbol={} minExclusive={} replayStartIndexHint={}", index, symbol, minExclusive, replayHint);
-            fileQueueWriter.replay(symbol, minExclusive, replayHint, (payload, orderReqOffset) -> {
-                try {
-                    producer.send(matchResultRecord(matchResultTopic, symbol, orderReqOffset, payload)).get(10, TimeUnit.SECONDS);
+            long startTime = System.nanoTime();
+            log.info("MatchSlot index={} replay file queue symbol={} minExclusive={} ,count = {},replayStartIndexHint={}", index, symbol, minExclusive, book.getReqOffset() - minExclusive, replayHint);
+            fileQueueWriter.replay(symbol, minExclusive, replayHint, (payload, orderReqOffset) -> producer.send(matchResultRecord(matchResultTopic, symbol, orderReqOffset, payload), new Callback() {
+                @Override
+                public void onCompletion(RecordMetadata metadata, Exception exception) {
                     engine.getBook().updateMasterReqOffsetIfGreater(orderReqOffset);
-                } catch (Exception ex) {
-                    log.error("MatchSlot replay failed symbol={} orderReqOffset={} slot={}", symbol, orderReqOffset, index, ex);
                 }
-            });
+            }));
+
+            log.info("MatchSlot index={} replay file queue symbol={},cost={} completed", index, symbol, (System.nanoTime() - startTime) / 1000);
             fileQueueWriter.clear(symbol);
+            log.info("MatchSlot index={} BECAME_MASTER clear file queue symbol={},cost={} ", index, symbol, (System.nanoTime() - startTime) / 1000);
             book.setComparedFileQueueStartIndex(-1L);
         }
         log.info("MatchSlot index={} BECAME_MASTER replay completed", index);
@@ -539,4 +572,7 @@ public class MatchSlot {
         return new ProducerRecord<>(topic, 0, "", payload, headers);
     }
 
+    public void notifyClose() {
+        pendingSlotEvents.add(SlotEvent.becameClose());
+    }
 }

@@ -6,13 +6,13 @@ import com.tk.match.compare.MatchResultMasterFileQueue;
 import com.tk.match.config.MatchEngineConfig;
 import com.tk.match.slot.MatchSlot;
 import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -35,6 +35,7 @@ public class MatchManager {
     private final String bootstrapServers;
     private final int ringBufferNumbers;
     private final List<String> symbols;
+
 
     private KafkaProducer<String, String> producer;
     private List<MatchSlot> slots;
@@ -173,11 +174,11 @@ public class MatchManager {
      */
     public void notifyBecameMaster() {
         if (slots != null) {
-            if (matchResultMasterFileQueue != null) {
-                matchResultMasterFileQueue.stop();
-            }
             for (MatchSlot matchSlot : slots) {
                 matchSlot.becameMaster();
+            }
+            if (matchResultMasterFileQueue != null) {
+                matchResultMasterFileQueue.stop();
             }
             log.info("MatchManager notifyBecameMaster slots={}", slots.size());
         }
@@ -223,7 +224,6 @@ public class MatchManager {
         return true;
     }
 
-    @PreDestroy
     public void stop() {
         if (slots != null) {
             for (MatchSlot slot : slots) {
@@ -249,4 +249,13 @@ public class MatchManager {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
         return new KafkaProducer<>(props);
     }
+
+    public void notifyClose() {
+        if (!CollectionUtils.isEmpty(slots)) {
+            for (MatchSlot matchSlot : slots) {
+                matchSlot.notifyClose();
+            }
+        }
+    }
+
 }
