@@ -1,7 +1,6 @@
 package com.tk.match.snapshot;
 
 import com.tk.match.config.MatchEngineConfig;
-import com.tk.match.ha.HaStatus;
 import com.tk.match.ha.MatchLeaderElectionService;
 import com.tk.match.service.MatchManager;
 import org.slf4j.Logger;
@@ -26,7 +25,7 @@ public class SnapshotScheduler {
     @Value("${match.snapshot-interval-ms:300000}")
     private long matchSnapshotIntervalMs = 300000;
 
-    private MatchEngineConfig matchEngineConfig;
+    private final MatchEngineConfig matchEngineConfig;
 
     public SnapshotScheduler(MatchManager matchManager,
                              MatchLeaderElectionService matchLeaderElectionService,
@@ -39,7 +38,7 @@ public class SnapshotScheduler {
     @Scheduled(fixedDelayString = "${match.snapshot-interval-ms:300000}", initialDelay = 1000 * 60)
     public void triggerSnapshots() {
         if (matchEngineConfig.isSnapshotEnabled()) {
-            if (HaStatus.isMaster()) {
+            if (matchManager.anyMaster()) {
                 int participants = matchLeaderElectionService.getParticipantCount();
                 if (participants > 1) {
                     if (log.isTraceEnabled()) {

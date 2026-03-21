@@ -73,6 +73,13 @@ public class MatchSlot {
 
     private volatile boolean isMaster = false;
 
+    /**
+     * 数据面是否为主：与 {@code process} 中写 Kafka / 写 slave 文件队列分支一致；由 HA 事件在补发完成后置位。
+     */
+    public boolean isMaster() {
+        return isMaster;
+    }
+
     private final Object waitSymbolLock = new Object();
 
     /**
@@ -123,13 +130,6 @@ public class MatchSlot {
         pendingSlotEvents.add(SlotEvent.becameMaster());
     }
 
-
-    /**
-     * 由比对/对齐服务回调：更新该 symbol 在 OrderBook 上的 comparedFileOffset，切主补发文件队列时从此对齐点之后开始。
-     */
-    public void updateComparedOffset(String symbol, long comparedOffset) {
-        updateComparedOffset(symbol, comparedOffset, -1L);
-    }
 
     /**
      * @param slaveQueueStartIndex slave Chronicle 已对齐末尾索引；无则 -1
@@ -419,8 +419,8 @@ public class MatchSlot {
                 case SNAPSHOT -> takeSnapshot(event.getSymbol());
                 case HA -> {
                     if (event.getHaEvent() == HaEvent.MASTER) {
-                        replayFromFileQueue();
                         isMaster = true;
+                        replayFromFileQueue();
                     } else {
                         isMaster = false;
                     }

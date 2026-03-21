@@ -1,9 +1,9 @@
 package com.tk.match.service;
 
-import com.tk.match.config.MatchEngineConfig;
 import com.tk.match.compare.DelayedFileDeletionService;
 import com.tk.match.compare.LastWrite;
 import com.tk.match.compare.MatchResultMasterFileQueue;
+import com.tk.match.config.MatchEngineConfig;
 import com.tk.match.slot.MatchSlot;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -106,6 +106,23 @@ public class MatchManager {
     }
 
     /**
+     * 是否存在**至少一个**槽位为数据面主（{@link MatchSlot#isMaster()} 为 true）。
+     * 为 OR 语义：任一条 slot 已切主即 true；与「全实例所有 slot 均已切主」不同，后者需自行对每个 slot 判断。
+     * 定时任务（如 {@link com.tk.match.snapshot.SnapshotScheduler}、{@link com.tk.match.compare.MatchResultChecker}）用此方法做粗粒度判断时，应注意切主过程中可能出现的「部分 slot 已为主、部分仍为从」窗口。
+     */
+    public boolean anyMaster() {
+        if (slots == null || slots.isEmpty()) {
+            return false;
+        }
+        for (MatchSlot slot : slots) {
+            if (slot.isMaster()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 返回指定 slot 当前负责的币对集合（用于定时任务下发快照）。
      */
     public Set<String> getSymbolsBySlotIndex(int slotIndex) {
@@ -152,8 +169,7 @@ public class MatchManager {
     }
 
     /**
-     * 切主后由 ZK 选主回调（或 HaStatus watcher）在 {@code HaStatus.setMaster(true)} 之后调用，
-     * 向每个 MatchSlot 投递 BECAME_MASTER，consumeLoop 将执行文件队列补发。
+     * 切主后由 ZK 选主回调（或单机无 ZK 启动）调用；向每个 MatchSlot 投递 BECAME_MASTER，consumeLoop 将执行文件队列补发。
      */
     public void notifyBecameMaster() {
         if (slots != null) {

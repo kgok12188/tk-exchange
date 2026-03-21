@@ -37,7 +37,8 @@ public class MatchLeaderElectionService {
     @PostConstruct
     public void start() {
         if (zookeeperServers == null || zookeeperServers.isEmpty()) {
-            log.warn("match-engine leader election disabled: zookeeper servers not configured");
+            log.warn("match-engine leader election disabled: zookeeper servers not configured; operating as standalone master");
+            matchManager.notifyBecameMaster();
             return;
         }
         matchManager.notifyBecameSlave();
@@ -53,14 +54,12 @@ public class MatchLeaderElectionService {
             leaderLatch.addListener(new LeaderLatchListener() {
                 @Override
                 public void isLeader() {
-                    HaStatus.setMaster(true);
                     matchManager.notifyBecameMaster();
                     log.info("match-engine became leader (latch path={})", latchPath);
                 }
 
                 @Override
                 public void notLeader() {
-                    HaStatus.setMaster(false);
                     matchManager.notifyBecameSlave();
                     log.info("match-engine lost leadership (latch path={})", latchPath);
                 }
@@ -93,7 +92,6 @@ public class MatchLeaderElectionService {
             }
             client = null;
         }
-        HaStatus.setMaster(false);
         if (matchManager != null) {
             matchManager.notifyBecameSlave();
         }

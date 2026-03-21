@@ -301,8 +301,8 @@ worker / ringBuffer 带来的并行性**仅发生在不同 symbol 之间**，不
 
 - **语义**：每个 MatchSlot 维护 **pendingSlotEvents**（待处理 slot 事件队列），用于**监听是否需要上币**与**监听主从切换**。事件类型：
   - **ADD_SYMBOL(symbol)**：需要增加该币对（上币）。
-  - **BECAME_MASTER**：本实例已切换为主节点（用于触发补发或切换写 Kafka）。
-  - **BECAME_SLAVE**：本实例已切换为从节点（用于停止写 Kafka、改为写文件队列；从节点需消费 match_result_* 同步 masterOffset，见 3.6.7）。
+  - **BECAME_MASTER**：本实例已切换为主节点（用于触发补发或切换写 Kafka）；由 **`MatchManager.notifyBecameMaster()`** 统一投递（ZK `isLeader()` 或无 ZK 单机主启动）。
+  - **BECAME_SLAVE**：本实例已切换为从节点（用于停止写 Kafka、改为写文件队列；从节点需消费 match_result_* 同步 masterOffset，见 3.6.7）；由 **`notifyBecameSlave()`** 投递。
 - **上币流程**：入口仍为 `MatchManager.addSymbol(symbol)`（由配置或管理接口触发）；根据 `slotIndex = hash(symbol) % N` 找到对应 slot，向该 slot 的 **pendingSlotEvents** 投递 **ADD_SYMBOL(symbol)**。slot 的**消费线程**（consumeLoop）在每轮 poll 前 drain pendingSlotEvents：遇到 ADD_SYMBOL 则创建 MatchEngine、将 `order_req_(symbol)` 加入当前 assign 集合并 `assign(更新后的 TopicPartition 列表)`，此后该 topic 的消息进入本 slot 队列，由 worker 按 symbol 路由到对应 MatchEngine。运行时上币时，若当前为从节点，`MatchManager.addSymbol` 还会向 **MatchResultMasterFileQueue** 投递该 symbol，以便从节点订阅 `match_result_(symbol)` 同步主进度。
 - **切主/切从流程**：见 3.6.7「主从与从节点消费 match_result_*」。
 - **前提**：仅 match-engine 侧逻辑；对应的 Kafka topic（如 `order_req_BTC_USDT`）需已存在或由上游创建。
@@ -382,8 +382,10 @@ worker / ringBuffer 带来的并行性**仅发生在不同 symbol 之间**，不
 
 **监听是否切换成主节点**
 
-- ZK 选主回调（或 HaStatus 的 watcher）在调用 `HaStatus.setMaster(true)` 之后，向**每个** MatchSlot 的 **pendingSlotEvents** 投递 **BECAME_MASTER** 事件。
-- 消费线程（consumeLoop）处理到 BECAME_MASTER 时执行切主后逻辑：可触发本 slot 的补发（遍历本 slot 各 symbol 的文件队列，将 orderReqOffset > masterOffset 的 payload 按序发往 Kafka），或仅设标志、由 worker 下次 process 时自然写 Kafka；若补发在 worker 执行，可在处理 BECAME_MASTER 时向 worker 队列投递「补发任务」，避免长时间阻塞 poll。
+- **数据面主从仅以 MatchSlot 为准**：每个 slot 内部 `isMaster` 决定 `process()` 写 Kafka 还是写 slave 文件队列；**已移除**全局静态 `HaStatus`，避免与撮合线程状态不一致。
+- **MatchManager#anyMaster()**：当**至少一个** `MatchSlot` 的 `isMaster()` 为 true 时返回 true（OR 语义）；用于快照调度、一致性校验等粗粒度判断。**非**「全部 slot 均已切主」；若需全为主需对每个 slot 单独判断。
+- **ZK 模式**：`MatchLeaderElectionService` 在 Curator `LeaderLatch` 回调 **`isLeader()`** 中调用 **`MatchManager.notifyBecameMaster()`**；在 **`notLeader()`** 中调用 **`notifyBecameSlave()`**。上述方法向**每个** MatchSlot 的 **pendingSlotEvents** 投递 **BECAME_MASTER** / **BECAME_SLAVE**，由 consumeLoop 转发至 Disruptor，在处理 **HA** 事件时执行文件队列补发并切换 `MatchSlot.isMaster`。
+- **无 ZK（单机/开发）**：未配置 `match.zookeeper-servers` 时选举不启用，启动时直接 **`notifyBecameMaster()`**，实例按**单机主**运行（与 slot 内补发路径一致）。
 
 **主从文件队列抽样比对（状态机一致性校验）**
 
@@ -393,7 +395,7 @@ worker / ringBuffer 带来的并行性**仅发生在不同 symbol 之间**，不
   - **对齐点**：`end = min(lastSlave, lastMaster)`（两边都有的最大 orderReqOffset）。
   - **倒推 N 条**：在区间 `(end - N, end]` 内，对每个 orderReqOffset 在两条队列中取对应 record，逐条比较 payload。
   - 若某 orderReqOffset 仅在一侧存在，可记缺失并打 error；若两侧都有但 payload 不一致，打 **error** 日志（含 symbol、orderReqOffset、差异摘要），便于人工介入和排查。
-- **行为**：仅读两条队列、比对、输出日志或指标；不修改队列、不改变主从状态。可实现为定时任务或独立比对线程。
+- **行为**：仅读两条队列、比对、输出日志或指标；不修改 Chronicle 队列文件。抽样**全部一致**时可通过 `MatchManager.updateComparedProgressFromConsistencyCheck` 更新 OrderBook 对齐进度；主从角色仍由选主与 slot HA 决定。调度侧仅当 **`MatchManager.anyMaster()` 为 false**（没有任何 slot 为主，通常即整实例为从）时执行比对（`MatchResultChecker`）；切主过程中若已存在任一 slot 为主则本轮跳过比对。
 
 ---
 

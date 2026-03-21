@@ -142,7 +142,7 @@ trading-server (settlement)
   - **主**：通过 **producer 推送 match_result_ 的成功回调**更新本实例各 symbol 的 OrderBook.masterOffset，表示「已成功写入 Kafka 的 order_req 进度（orderReqOffset）」。
   - **从**：**消费同一组 match_result_**（主写的 topic），解析每条消息的 orderReqOffset，按 symbol 更新本实例 OrderBook.masterOffset，**实时感知主的处理速度**；从不用 match_result_ 更新订单簿，仅更新 masterOffset。
 - **补发**：从晋升为主后，将文件队列中 **order_req offset > masterOffset** 的 MatchResponse 按序补发到 Kafka，再继续写 Kafka，保证下游看到连续流；补发边界以 Kafka 当前进度（masterOffset）为准，避免重复与漏发。
-- **监听是否切换成主节点**：ZK 选主回调（或 HaStatus 的 watcher）在调用 `HaStatus.setMaster(true)` 之后，向**每个** MatchSlot 的 **pendingSlotEvents** 投递 **BECAME_MASTER** 事件。消费线程（consumeLoop）处理到 BECAME_MASTER 时执行切主后逻辑：可触发本 slot 的补发（遍历本 slot 各 symbol 的文件队列，orderReqOffset > masterOffset 的 payload 发往 Kafka），或仅设标志、由 worker 下次 process 时自然走 Kafka；若补发在消费线程执行需注意不长时间阻塞 poll，若在 worker 执行则可在 BECAME_MASTER 处理时向 worker 队列投递「补发任务」。
+- **监听是否切换成主节点**：**已移除**全局 `HaStatus`；数据面以 **MatchSlot.isMaster** 为准；**`MatchManager.anyMaster()`** 表示是否存在**至少一个** slot 已切主（OR），供定时任务粗判，**不是**「全部 slot 已切主」。ZK 模式下 `LeaderLatch` 回调 **`isLeader()`** / **`notLeader()`** 分别调用 **`notifyBecameMaster()`** / **`notifyBecameSlave()`**，向每个 MatchSlot 的 **pendingSlotEvents** 投递 **BECAME_MASTER** / **BECAME_SLAVE**；无 ZK 时启动即 **`notifyBecameMaster()`**（单机主）。consumeLoop 将 HA 转发至 Disruptor，处理补发并切换 `isMaster`。
 - **从节点文件队列（每币一个队列）**：
   - **每币一个队列**：配置 **`match.file-queue-dir`**（从节点文件队列根目录）；在该目录下按 **symbol 建子目录**，每个 symbol 一个 Chronicle Queue（一个目录即一个 queue），例如 `{file-queue-dir}/BTC_USDT`。
   - **写入时机**：在 **MatchSlot.process()** 中，当 `response != null` 且当前实例为从时，不 producer.send，改为向该 symbol 的文件队列追加一条记录。
@@ -155,7 +155,7 @@ trading-server (settlement)
     - **对齐点**：`end = min(lastSlave, lastMaster)`（两边都有的最大 orderReqOffset）。
     - **倒推 N 条**：在区间 `(end - N, end]` 内，对每个 orderReqOffset 在两条队列中取对应 record，逐条比较 payload。
     - 若某 orderReqOffset 仅在一侧存在，可记缺失并打 error；若两侧都有但 payload 不一致，打 **error** 日志（含 symbol、orderReqOffset、差异摘要），便于人工介入和排查。
-  - **行为**：仅读两条队列、比对、输出日志或指标；不修改队列、不改变主从状态。可实现为定时任务或独立比对线程。
+  - **行为**：仅读两条队列、比对、输出日志或指标；不修改 Chronicle 队列文件；抽样全部一致时可 `updateComparedProgressFromConsistencyCheck` 更新 OrderBook；主从角色仍由选主与 slot HA 决定。定时任务仅在 **`MatchManager.anyMaster()` 为 false** 时跑比对（`MatchResultChecker`）；任一条 slot 为主则跳过本轮。
 - **Rationale**：与 trading-server 主从模型一致（实例级 + ZK）；从写文件队列降低对 Kafka 的依赖并保留可补发缓冲；masterOffset 统一「主已对外可见进度」的语义；每币一队列 + 统一格式便于实现与补发对齐；抽样比对在不影响主路径的前提下提供一致性校验与人工排查入口。
 
 ## Risks / Trade-offs

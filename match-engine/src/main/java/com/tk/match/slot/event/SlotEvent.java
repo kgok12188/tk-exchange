@@ -9,10 +9,6 @@ package com.tk.match.slot.event;
  */
 public interface SlotEvent {
 
-    static SlotEvent addSymbol(String symbol) {
-        return new AddSymbolEvent(symbol);
-    }
-
     static SlotEvent addSymbol(String symbol, long initialMasterOffset) {
         return new AddSymbolEvent(symbol, initialMasterOffset);
     }

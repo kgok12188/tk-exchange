@@ -47,11 +47,6 @@ public final class SlotTaskEvent {
         this.haEvent = haEvent;
     }
 
-
-    public void setComparedOffset(String symbol, String rawJson, long compareOffset) {
-        setMoveCompareOffset(symbol, compareOffset, -1L);
-    }
-
     public void setMoveCompareOffset(String symbol, long compareOffset, long compareQueueIndex) {
         this.type = Type.MOVE_COMPARE_OFFSET;
         this.symbol = symbol;

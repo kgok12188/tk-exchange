@@ -1,7 +1,6 @@
 package com.tk.match.compare;
 
 import com.tk.match.config.MatchEngineConfig;
-import com.tk.match.ha.HaStatus;
 import com.tk.match.service.MatchManager;
 import jakarta.annotation.PreDestroy;
 import net.openhft.chronicle.queue.ExcerptTailer;
@@ -25,7 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * end = min(lastSlave, lastMaster)，在 (end - N, end] 内倒推 N 条逐条比较 payload；不一致或缺失打 error 日志。
  * 抽样全部一致时通过 {@link MatchManager#updateComparedProgressFromConsistencyCheck} 更新 OrderBook 对齐进度（不写 Chronicle 文件）。
  * <p>
- * 仅当 match.consistencyCheckEnabled=true、match.fileQueueDir 非空且当前为从节点时执行。
+ * 仅当 match.consistencyCheckEnabled=true、match.fileQueueDir 非空且 {@link MatchManager#anyMaster()} 为 false（即没有任何 slot 处于主）时执行。
  */
 @Component
 public class MatchResultChecker {
@@ -44,7 +43,7 @@ public class MatchResultChecker {
     @Scheduled(fixedDelayString = "${match.consistency-check-interval-ms:5000}", initialDelay = 10000)
     public void run() {
         if (matchEngineConfig.isConsistencyCheckEnabled()) {
-            if (HaStatus.isMaster()) return;
+            if (matchManager.anyMaster()) return;
             String base = matchEngineConfig.getFileQueueDir();
             if (base == null || base.isBlank()) return;
             Path baseDir = Path.of(base);
@@ -150,7 +149,7 @@ public class MatchResultChecker {
                 count++;
             }
         }
-        log.info("StateMachineConsistencyCheck symbol={} checked {} records allMatch={}", symbol, count, allMatch);
+        log.info("StateMachineConsistencyCheck symbol={} checked {} records allMatch={},end={},effectiveSlaveIdx={}", symbol, count, allMatch, end, effectiveSlaveIdx);
         if (allMatch) {
             matchManager.updateComparedProgressFromConsistencyCheck(symbol, end, effectiveSlaveIdx);
         }
