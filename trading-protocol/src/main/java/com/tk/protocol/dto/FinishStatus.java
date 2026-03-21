@@ -8,6 +8,7 @@ public enum FinishStatus {
     CANCEL,
     PART_CANCEL,
     EXCEPTION,
+    REJECT,
     /** LIMIT_MAKER order rejected because it would have crossed the spread (taker fill). */
     POST_ONLY_REJECT
 }

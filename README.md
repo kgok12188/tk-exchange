@@ -364,7 +364,10 @@ worker / ringBuffer 带来的并行性**仅发生在不同 symbol 之间**，不
 
 **从节点文件队列实现约定（每币一个队列）**
 
-- **每币一个队列**：配置项 **`match.file-queue-dir`**（从节点文件队列根目录）；在该目录下**按 symbol 建子目录**，每个 symbol 对应一个独立的 Chronicle Queue（Chronicle 一个目录即一个 queue），例如 `{file-queue-dir}/BTC_USDT`、`{file-queue-dir}/ETH_USDT`。同一 slot 内多币对即多个 queue，互不共用。
+- **目录布局**：配置项 **`match.file-queue-dir`** 为根目录（baseDir）。实现上在根目录下分 **`slave/`** 与 **`master/`** 两支，再按 symbol 各建子目录；每个 symbol 对应一个独立的 Chronicle Queue（一个目录即一个 queue），例如 **`{file-queue-dir}/slave/BTC_USDT`**、**`{file-queue-dir}/master/BTC_USDT`**。同一 slot 内多币对即多个 queue，互不共用。
+  - **`slave/{symbol}/`**：从节点撮合产出的 MatchResponse 写入此处（`MatchResultSlaveFileQueue`），供升主补发。
+  - **`master/{symbol}/`**：从节点消费 Kafka `match_result_*` 后写入的主侧副本（`MatchResultMasterFileQueue`），用于更新 `masterOffset` 及与 slave 抽样比对。
+- **进程启动**：`MatchManager` 构造阶段若 `match.file-queue-dir` 非空，会**递归删除整个根目录**（含 `master/`、`slave/` 下已有 Chronicle 数据），冷启动不沿用旧文件；若需持久化保留，请使用独立路径或另行调整代码。
 - **写入时机与接入点**：在 **MatchSlot.process()** 中，当 `response != null` 且当前实例为**从**时，不调用 `producer.send`，改为向该 symbol 对应的文件队列追加一条记录；主节点保持现有逻辑（producer.send + 成功回调更新 masterOffset）。
 - **记录格式**：与 **ChronicleQueueTest#replayFromOffsetSimulation** 一致，便于补发时用同一套读逻辑。每条记录 = **orderReqOffset**（long，即 order_req 的 Kafka offset）+ **payload**（String，即 MatchResponse JSON）。Chronicle Wire 写法：`wire().write().int64(orderReqOffset).write().text(payload)`。
 - **补发读法**：升主后对每个 symbol 的 queue 创建 tailer，顺序读每条记录；仅将 **orderReqOffset > 该 symbol 当前 masterOffset** 的 payload 按序发往 Kafka，发送成功后调用 **updateMasterOffsetIfGreater(orderReqOffset)** 更新 masterOffset；补发完成后清空该 symbol 的文件队列，再切换为该 symbol 的主逻辑（新产生的 response 直接 producer.send）。与测试用例中的「replayFromOffsetSimulation」逻辑一致。

@@ -93,17 +93,20 @@ public final class OrderBook {
         if (volume == null || volume.compareTo(ZERO) <= 0) return emptyResult();
 
         BookOrder order = toBookOrder(payload, volume, orderReqOffset);
-        ordersById.put(order.getOrderId(), order);
 
         OrderMatcher matcher = selectMatcher(payload.getPriceType());
+        if (matcher == null) {
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(order, FinishStatus.REJECT, volume)));
+        }
         return matcher.match(this, order, orderReqOffset);
     }
 
     private static OrderMatcher selectMatcher(String priceType) {
-        if (priceType == null) return LIMIT_MATCHER;
+        if (priceType == null) return null;
         return switch (priceType.toUpperCase()) {
             case "MARKET" -> MARKET_MATCHER;
-            case "LIMIT_MAKER", "POST_ONLY" -> LIMIT_MAKER_MATCHER;
+            case "LIMIT_MAKER" -> LIMIT_MATCHER;
+            case "POST_ONLY" -> LIMIT_MAKER_MATCHER;
             default -> LIMIT_MATCHER;
         };
     }
@@ -148,6 +151,7 @@ public final class OrderBook {
     void addToBook(BookOrder order) {
         TreeMap<BigDecimal, PriceLevel> book = order.isSideBuy() ? buySide : sellSide;
         book.computeIfAbsent(order.getPrice(), k -> new PriceLevel()).addLast(order);
+        ordersById.put(order.getOrderId(), order);
     }
 
     void removeFromBook(BookOrder order) {

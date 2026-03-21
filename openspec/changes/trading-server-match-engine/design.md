@@ -121,7 +121,7 @@ trading-server (settlement)
 
 - **Decision**：match-engine 进程内创建固定 N 个 **slot**，每个 slot 独立拥有 Kafka consumer、队列与撮合 worker；`slotIndex = hash(symbol) % N`，同一 symbol 始终落在同一 slot，保证单币对严格顺序。
 - **每个 slot**：维护**币对列表**（symbols），topic 由 **`order_req_(symbol)`** 推导（即 `order_req_` + symbol）；负责的 topics 满足 `hash(symbol)%N == slotIndex`；独立 consumer 使用 `assign(本 slot 的 TopicPartition 列表)`；消费线程 poll → 入队；worker 线程 take → 按 symbol 路由到本 slot 内的 MatchEngine（订单簿），撮合后写 `match_result_(symbol)`。配置项：`match.symbols`（初始币对）、`match.ringBufferNumbers`（N）。
-- **运行时上币与 slot 事件队列**：每个 slot 维护 **pendingSlotEvents**（待处理 slot 事件队列），事件类型包括：**ADD_SYMBOL(symbol)**（需上币）、**BECAME_MASTER**（已切换为主节点）。消费线程（consumeLoop）在每轮 poll 前 drain 该队列，按事件类型处理：ADD_SYMBOL → 创建 MatchEngine、将 `order_req_(symbol)` 加入 assign 集合并 assign；BECAME_MASTER → 执行切主后动作（如触发补发或仅依赖下次 process 写 Kafka）。上币入口：`MatchManager.addSymbol(symbol)` 根据 slotIndex 找到对应 slot，向该 slot 的 pendingSlotEvents 投递 **ADD_SYMBOL(symbol)**；配置刷新、管理接口或未来「上币 topic」也可向同一队列投递 ADD_SYMBOL，实现「监听是否需要上币」。
+- **运行时上币与 slot 事件队列**：每个 slot 维护 **pendingSlotEvents**（待处理 slot 事件队列）。除 **ADD_SYMBOL**、**BECAME_MASTER** / **BECAME_SLAVE**（ZK 选主回调）外，实现中还有 **SNAPSHOT_REQUEST**、**ComparedEvent**（一致性比对进度）、**CLOSE**（停机）等，均由 consumeLoop drain 后转发到 Disruptor 单线程处理。典型路径：ADD_SYMBOL → 创建 MatchEngine、将 `order_req_(symbol)` 加入 assign；BECAME_MASTER → 文件队列补发并切换 `isMaster`。上币入口：`MatchManager.addSymbol(symbol)` 向对应 slot 投递 **ADD_SYMBOL**。
 - **与代码对应**：MatchManager（编排、上币、构建 N 个 MatchSlot）；MatchSlot（consumer + queue + worker，enginesBySymbol，**pendingSlotEvents**，**addSymbol(symbol)** 内部投递 ADD_SYMBOL，getSymbols()）；MatchEngine + OrderBook（单 symbol 订单簿）；PriceLevel（同价档 LinkedHashMap key=seq，peekFirst / addLast / remove(seq)）。
 
 ### 8. 订单簿快照与启动恢复
@@ -144,8 +144,9 @@ trading-server (settlement)
 - **补发**：从晋升为主后，将文件队列中 **order_req offset > masterOffset** 的 MatchResponse 按序补发到 Kafka，再继续写 Kafka，保证下游看到连续流；补发边界以 Kafka 当前进度（masterOffset）为准，避免重复与漏发。
 - **监听是否切换成主节点**：**已移除**全局 `HaStatus`；数据面以 **MatchSlot.isMaster** 为准；**`MatchManager.anyMaster()`** 表示是否存在**至少一个** slot 已切主（OR），供定时任务粗判，**不是**「全部 slot 已切主」。ZK 模式下 `LeaderLatch` 回调 **`isLeader()`** / **`notLeader()`** 分别调用 **`notifyBecameMaster()`** / **`notifyBecameSlave()`**，向每个 MatchSlot 的 **pendingSlotEvents** 投递 **BECAME_MASTER** / **BECAME_SLAVE**；无 ZK 时启动即 **`notifyBecameMaster()`**（单机主）。consumeLoop 将 HA 转发至 Disruptor，处理补发并切换 `isMaster`。
 - **从节点文件队列（每币一个队列）**：
-  - **每币一个队列**：配置 **`match.file-queue-dir`**（从节点文件队列根目录）；在该目录下按 **symbol 建子目录**，每个 symbol 一个 Chronicle Queue（一个目录即一个 queue），例如 `{file-queue-dir}/BTC_USDT`。
-  - **写入时机**：在 **MatchSlot.process()** 中，当 `response != null` 且当前实例为从时，不 producer.send，改为向该 symbol 的文件队列追加一条记录。
+  - **目录布局**：配置 **`match.file-queue-dir`** 为根目录（baseDir）。实现上为 **`{file-queue-dir}/slave/{symbol}/`**（从节点撮合产出，`MatchResultSlaveFileQueue`）与 **`{file-queue-dir}/master/{symbol}/`**（消费 `match_result_*` 写入的主侧副本，`MatchResultMasterFileQueue`）；每个 symbol 目录即一个 Chronicle Queue。
+  - **进程启动**：`MatchManager` 构造阶段若 `file-queue-dir` 非空，会**递归删除整个根目录**（含 `master/`、`slave/`），与「每进程冷启动」一致；运维若需保留历史文件需换路径或改实现。
+  - **写入时机（slave）**：在 **MatchSlot.process()** 中，当 `response != null` 且当前实例为从时，不 producer.send，改为向该 symbol 的 **slave** 文件队列追加一条记录。
   - **记录格式**：与 **ChronicleQueueTest#replayFromOffsetSimulation** 一致：每条 = **orderReqOffset**（long，order_req 的 Kafka offset）+ **payload**（String，MatchResponse JSON）。Chronicle Wire：`wire().write().int64(orderReqOffset).write().text(payload)`。补发时 tailer 顺序读，仅发 orderReqOffset > masterOffset 的 payload。
   - **参考**：测试类 `com.tk.match.queue.ChronicleQueueTest#replayFromOffsetSimulation`。
 - **主从文件队列抽样比对（状态机一致性校验）**：
