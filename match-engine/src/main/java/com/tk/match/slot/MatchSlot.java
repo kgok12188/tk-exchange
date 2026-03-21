@@ -412,14 +412,16 @@ public class MatchSlot {
             long replayHint = book.getComparedFileQueueStartIndex();
             String matchResultTopic = matchResultTopic(symbol);
             long startTime = System.nanoTime();
-            log.info("MatchSlot index={} replay file queue symbol={} minExclusive={} ,count = {},replayStartIndexHint={}", index, symbol, minExclusive, book.getReqOffset() - minExclusive, replayHint);
-            fileQueueWriter.replay(symbol, minExclusive, replayHint, (payload, orderReqOffset) -> producer.send(matchResultRecord(matchResultTopic, symbol, orderReqOffset, payload), new Callback() {
-                @Override
-                public void onCompletion(RecordMetadata metadata, Exception exception) {
-                    engine.getBook().updateMasterReqOffsetIfGreater(orderReqOffset);
-                }
-            }));
+            log.info("MatchSlot index={} replay file queue symbol={} minExclusive={} ,count = {},replayStartIndexHint={}", index, symbol, minExclusive, Math.max(0, book.getReqOffset() - minExclusive), replayHint);
+            if (book.getReqOffset() - minExclusive > 0) {
+                fileQueueWriter.replay(symbol, minExclusive, replayHint, (payload, orderReqOffset) -> producer.send(matchResultRecord(matchResultTopic, symbol, orderReqOffset, payload), new Callback() {
+                    @Override
+                    public void onCompletion(RecordMetadata metadata, Exception exception) {
+                        engine.getBook().updateMasterReqOffsetIfGreater(orderReqOffset);
+                    }
 
+                }));
+            }
             log.info("MatchSlot index={} replay file queue symbol={},cost={} completed", index, symbol, (System.nanoTime() - startTime) / 1000);
             fileQueueWriter.clear(symbol);
             log.info("MatchSlot index={} BECAME_MASTER clear file queue symbol={},cost={} ", index, symbol, (System.nanoTime() - startTime) / 1000);

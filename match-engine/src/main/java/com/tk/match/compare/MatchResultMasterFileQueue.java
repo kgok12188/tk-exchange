@@ -130,19 +130,8 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
         startConsumer(Collections.emptySet());
     }
 
-    /**
-     * 主节点时调用：停止消费线程并释放资源，不解除 MatchManager 引用，以便再次变从节点时可 ensureStarted。
-     */
-    public void stopConsumer() {
-        close();
-    }
-
     public void stop() {
         close();
-    }
-
-    public boolean isRunning() {
-        return running.get();
     }
 
     private void startConsumer(Collection<String> initialSymbols) {
@@ -163,7 +152,7 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
                 consumer.seekToBeginning(initial);
                 log.info("MatchResultMasterFileQueue assigned at start (seekToBeginning): {}", initial);
             }
-            consumerThread = new Thread(this::runLoop, "match-result-master-consumer");
+            consumerThread = new Thread(this::runLoop, "match-result-master-" + System.currentTimeMillis());
             consumerThread.setDaemon(true);
             consumerThread.start();
             log.info("MatchResultMasterFileQueue started groupId={} symbols={}", groupId, symbols.size());

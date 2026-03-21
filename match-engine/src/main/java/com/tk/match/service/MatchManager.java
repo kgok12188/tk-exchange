@@ -14,7 +14,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -26,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 每个 MatchSlot 自管 Kafka 消费 + 队列 + 撮合 worker（见 架构 3.6）。
  * 支持运行时上币：{@link #addSymbol(String)} 可在不重启前提下为指定 symbol 开始撮合。
  */
-@Component
+@Component("matchManager")
 public class MatchManager {
 
     private static final Logger log = LoggerFactory.getLogger(MatchManager.class);
@@ -54,6 +59,8 @@ public class MatchManager {
     private final String snapshotDir;
     private final String fileQueueDir;
 
+    private MatchEngineConfig matchEngineConfig;
+
     public MatchManager(MatchEngineConfig matchConfig,
                         @org.springframework.beans.factory.annotation.Value("${kafka.servers:localhost:9092}") String bootstrapServers) {
         this.bootstrapServers = bootstrapServers;
@@ -63,6 +70,8 @@ public class MatchManager {
         this.snapshotDir = (dir != null && !dir.isBlank()) ? dir : null;
         String fqDir = matchConfig.getFileQueueDir();
         this.fileQueueDir = (fqDir != null && !fqDir.isBlank()) ? fqDir : null;
+        this.matchEngineConfig = matchConfig;
+        clearDir();
     }
 
     @PostConstruct
@@ -256,6 +265,49 @@ public class MatchManager {
                 matchSlot.notifyClose();
             }
         }
+    }
+
+
+    private void clearDir() {
+        if (matchEngineConfig == null) {
+            return;
+        }
+        String baseDir = matchEngineConfig.getFileQueueDir();
+        if (baseDir == null || baseDir.isBlank()) {
+            return;
+        }
+        Path master = Path.of(baseDir);
+        try {
+            deleteDirectoryRecursively(master);
+            log.info("MatchResultMasterFileQueue startup cleared master file queue dir: {}", master.toAbsolutePath());
+        } catch (IOException e) {
+            log.warn("MatchResultMasterFileQueue failed to clear master file queue dir: {}", master.toAbsolutePath(), e);
+        }
+    }
+
+    /**
+     * 递归删除目录及其下所有文件（若路径不存在则 no-op）。
+     */
+    private static void deleteDirectoryRecursively(Path root) throws IOException {
+        if (!Files.exists(root)) {
+            return;
+        }
+        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                if (exc != null) {
+                    throw exc;
+                }
+                Files.delete(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
 }
