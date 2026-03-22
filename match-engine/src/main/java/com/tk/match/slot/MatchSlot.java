@@ -16,7 +16,7 @@ import com.tk.match.slot.event.*;
 import com.tk.match.snapshot.SnapshotFileHelper;
 import com.tk.match.snapshot.SnapshotLoadResult;
 import com.tk.protocol.ProtocolSerde;
-import com.tk.protocol.ProtocolVersion;
+import com.tk.protocol.dto.MarketConfig;
 import com.tk.protocol.dto.MatchResponse;
 import com.tk.protocol.dto.OrderCommand;
 import org.apache.commons.lang3.StringUtils;
@@ -93,9 +93,7 @@ public class MatchSlot {
      * @param tailQueryService           查询 match_result_ 尾部的 Service，切主补发前按需查询 masterOffset
      * @param delayedFileDeletionService 可选；非空时 StoreFileListener 释放文件后延迟 30 分钟删除
      */
-    public MatchSlot(int index, KafkaProducer<String, String> producer, List<String> symbols, String bootstrapServers, Path snapshotDir,
-                     Path fileQueueDir, MatchResultTailQueryService tailQueryService,
-                     DelayedFileDeletionService delayedFileDeletionService) {
+    public MatchSlot(int index, KafkaProducer<String, String> producer, List<String> symbols, String bootstrapServers, Path snapshotDir, Path fileQueueDir, MatchResultTailQueryService tailQueryService, DelayedFileDeletionService delayedFileDeletionService) {
         this.index = index;
         this.producer = producer;
         this.symbols = symbols != null ? new ArrayList<>(symbols) : new ArrayList<>();
@@ -173,7 +171,7 @@ public class MatchSlot {
         }
     }
 
-    public void start() {
+    public void start() throws Exception {
         if (!running.compareAndSet(false, true)) return;
         consumer = createConsumer();
         List<TopicPartition> partitions = new ArrayList<>(symbols.size());
@@ -183,7 +181,7 @@ public class MatchSlot {
         Map<String, Long> seekOffsetBySymbol = new HashMap<>();
         for (String symbol : symbols) {
             log.info("start restore symbol={} from snapshot", symbol);
-            MatchEngine engine = new MatchEngine(symbol);
+            MatchEngine engine = new MatchEngine(symbol, MarketConfig.defaultFor(symbol));
             if (snapshotDir != null) {
                 SnapshotLoadResult loaded = SnapshotFileHelper.load(snapshotDir, symbol);
                 if (loaded != null) {
@@ -207,14 +205,9 @@ public class MatchSlot {
                 log.info("MatchSlot index={} symbol={} seek to beginning (offset 0)", index, symbol);
             }
         }
-        disruptor = new Disruptor<>(
-                new SlotTaskEventFactory(),
-                RING_BUFFER_SIZE,
-                r -> {
-                    return new Thread(r, "match-slot-" + index);
-                },
-                ProducerType.SINGLE,
-                new BlockingWaitStrategy());
+        disruptor = new Disruptor<>(new SlotTaskEventFactory(), RING_BUFFER_SIZE, r -> {
+            return new Thread(r, "match-slot-" + index);
+        }, ProducerType.SINGLE, new BlockingWaitStrategy());
         disruptor.handleEventsWith((event, sequence, endOfBatch) -> dispatchSlotTaskEvent(event));
         disruptor.start();
         ringBuffer = disruptor.getRingBuffer();
@@ -223,8 +216,12 @@ public class MatchSlot {
         consumerThread.start();
     }
 
-    private static OrderBook getOrderBook(MatchEngine engine, SnapshotLoadResult loaded) {
+    private static OrderBook getOrderBook(MatchEngine engine, SnapshotLoadResult loaded) throws Exception {
+        if (loaded == null) {
+            return engine.getBook();
+        }
         OrderBook book = engine.getBook();
+        book.loadFromSnapshot(loaded, loaded.marketConfigVersion());
         for (BookOrder bo : loaded.orders()) {
             if (bo.getPrice() != null && bo.getRemainingVolume() != null) {
                 book.restoreOrder(bo.getOrderId(), bo.getUid() != null ? bo.getUid() : 0L, bo.getShardId(), bo.getSide(), bo.getPrice(), bo.getRemainingVolume(), bo.getSeq());
@@ -315,7 +312,7 @@ public class MatchSlot {
                     String symbol = topic.startsWith(ORDER_REQ_PREFIX) ? topic.substring(ORDER_REQ_PREFIX.length()) : topic;
                     seq = ringBuffer.next();
                     try {
-                        ringBuffer.get(seq).setOrder(symbol, record.value(), record.offset());
+                        ringBuffer.get(seq).setOrder(symbol, record.value(), record.offset(), record.timestamp());
                     } finally {
                         ringBuffer.publish(seq);
                     }
@@ -359,7 +356,7 @@ public class MatchSlot {
             if (e instanceof AddSymbolEvent add) {
                 String symbol = add.getSymbol();
                 if (symbol != null && !symbol.isEmpty()) {
-                    MatchEngine engine = enginesBySymbol.putIfAbsent(symbol, new MatchEngine(symbol));
+                    MatchEngine engine = enginesBySymbol.putIfAbsent(symbol, new MatchEngine(symbol, MarketConfig.defaultFor(symbol)));
                     if (engine == null && add.getInitialMasterOffset() > 0) {
                         enginesBySymbol.get(symbol).getBook().updateMasterReqOffsetIfGreater(add.getInitialMasterOffset());
                     } else if (engine != null && add.getInitialMasterOffset() > 0) {
@@ -450,7 +447,7 @@ public class MatchSlot {
         try {
             switch (event.getType()) {
                 case ORDER ->
-                        process(new OrderCommandEnvelope(event.getSymbol(), event.getRawJson(), event.getOrderReqOffset()));
+                        process(new OrderCommandEnvelope(event.getSymbol(), event.getRawJson(), event.getOrderReqOffset(), event.getTimestamp()));
                 case SNAPSHOT -> takeSnapshot(event.getSymbol());
                 case HA -> {
                     if (event.getHaEvent() == HaEvent.MASTER) {
@@ -489,9 +486,8 @@ public class MatchSlot {
             return;
         }
 
-        Collection<com.tk.match.engine.BookOrder> orders = book.exportOrders();
         try {
-            SnapshotFileHelper.write(snapshotDir, symbol, offset, orders);
+            SnapshotFileHelper.write(snapshotDir, symbol, offset, book, book.getMarketConfig(), book.getAppliedMarketConfigVersion());
             book.setSnapshotOffset(offset);
             log.info("snapshot completed symbol={} offset={}", symbol, offset);
         } catch (Exception e) {
@@ -518,10 +514,10 @@ public class MatchSlot {
             return;
         }
 
-        MatchResponse response = engine.process(cmd, orderReqOffset);
+        MatchResponse response = engine.process(cmd, orderReqOffset, envelope.getTimestamp());
 
         if (response != null) {
-            MatchResponse withOffset = MatchResponse.builder().taker(response.getTaker()).trades(response.getTrades()).finishOrders(response.getFinishOrders()).offset(ProtocolVersion.CURRENT).build();
+            MatchResponse withOffset = MatchResponse.builder().taker(response.getTaker()).trades(response.getTrades()).finishOrders(response.getFinishOrders()).offset(orderReqOffset).build();
             String out = ProtocolSerde.toJson(withOffset);
             if (isMaster) {
                 String matchResultTopic = matchResultTopic(symbol);

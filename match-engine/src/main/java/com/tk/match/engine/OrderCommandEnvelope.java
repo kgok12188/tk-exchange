@@ -12,11 +12,13 @@ public class OrderCommandEnvelope {
     private final String symbol;
     private final String rawJson;
     private final long orderReqOffset;
+    private final long timestamp;
 
-    public OrderCommandEnvelope(String symbol, String rawJson, long orderReqOffset) {
+    public OrderCommandEnvelope(String symbol, String rawJson, long orderReqOffset, long timestamp) {
         this.symbol = symbol;
         this.rawJson = rawJson;
         this.orderReqOffset = orderReqOffset;
+        this.timestamp = timestamp;
     }
 
 }

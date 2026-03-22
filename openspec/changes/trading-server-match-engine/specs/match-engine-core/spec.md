@@ -75,10 +75,16 @@ The match-engine SHALL support taking snapshots of the order book per symbol for
 - **AND** the file name SHALL be `{symbol}.{19-digit zero-padded offset}` (e.g. `BTC_USDT.0000000000000123456`), with symbol containing no `.`
 - **AND** the first line SHALL be a single JSON object describing the order book: at least `offset`, `orderCount`; optionally `symbol`, `ts`
 - **AND** each subsequent line SHALL be one JSON object per resting order with fields sufficient to restore (e.g. orderId, uid, shardId, side, price, remainingVolume, seq); empty book SHALL have only the first line with `orderCount=0`
+- **Implementation note**: Internal `BookOrder` uses `volume`/`remainingVolume` (base) and, for market IOC semantics when applicable, `amount`/`remainingAmount` (quote budget or cumulative quote cap); resting limit orders typically omit quote fields.
 
 #### Scenario: Restore from snapshot at startup
 - **WHEN** the match-engine starts and finds snapshot file(s) in the snapshot directory for a symbol
 - **THEN** it SHALL parse the file name to obtain (symbol, offset) and the first line to obtain offset and orderCount
 - **AND** it SHALL parse order lines, sort them by seq ascending, and rebuild the order book by applying each order in that order (e.g. restoreOrder) without triggering matching
 - **AND** it SHALL set the order book’s reqOffset to the snapshot offset and SHALL seek the consumer for `order_req_(symbol)` to that offset so that only incremental messages are processed
+
+## Implementation notes (HA / master–slave consistency sampling)
+
+- **Single-threaded order book per symbol**: For each symbol, the in-memory order book SHALL be read and mutated only on that symbol’s **slot worker thread** (no concurrent cross-thread access to the same `OrderBook`).
+- **Sampling compares persisted queues only**: Optional master–slave consistency checks SHALL compare **Chronicle queue files already written to disk** under the configured `match.file-queue-dir` (`slave/{symbol}` vs `master/{symbol}`), not two in-memory order books; such checks SHALL be read-only on those files and **SHALL NOT** race the worker’s order-book mutations.
 

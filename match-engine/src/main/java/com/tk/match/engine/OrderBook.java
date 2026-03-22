@@ -1,41 +1,73 @@
 package com.tk.match.engine;
 
+import com.tk.match.engine.matcher.*;
+import com.tk.match.snapshot.SnapshotLoadResult;
+import com.tk.match.snapshot.SnapshotMetadata;
 import com.tk.protocol.dto.FinishOrder;
 import com.tk.protocol.dto.FinishStatus;
+import com.tk.protocol.dto.MarketConfig;
 import com.tk.protocol.dto.OrderPayload;
-import com.tk.protocol.dto.TradeOrder;
+import exchange.core2.collections.art.LongAdaptiveRadixTreeMap;
+import exchange.core2.collections.art.LongObjConsumer;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.commons.lang3.StringUtils;
+import org.roaringbitmap.longlong.Roaring64NavigableMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
+import java.io.ObjectInputStream;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.*;
+
+import static com.tk.match.engine.matcher.MatchSupport.finishOrder;
 
 /**
  * High-performance in-memory order book: price-time priority, single-threaded per symbol.
- * Delegates LIMIT / MARKET / LIMIT_MAKER behaviour to {@link LimitOrderMatcher}, {@link MarketOrderMatcher}, {@link LimitMakerOrderMatcher}.
+ * 价格档位索引使用 {@link LongAdaptiveRadixTreeMap}（long 定点刻度键，借鉴 exchange-core）；档内仍为 FIFO {@link PriceLevel}。
  */
 public final class OrderBook {
 
-    private static final BigDecimal ZERO = BigDecimal.ZERO;
-
-    private static final OrderMatcher LIMIT_MATCHER = new LimitOrderMatcher();
-    private static final OrderMatcher MARKET_MATCHER = new MarketOrderMatcher();
-    private static final OrderMatcher LIMIT_MAKER_MATCHER = new LimitMakerOrderMatcher();
+    private static final Logger log = LoggerFactory.getLogger(OrderBook.class);
 
     @Getter
     private String matchResultTopic;
 
+    @Getter
+    private final String symbol;
+
     /**
-     * Buy: best first = highest price, then FIFO.
+     * 当前生效的撮合规则；{@link #applyMarketConfig} / 快照加载时更新。
      */
-    private final TreeMap<BigDecimal, PriceLevel> buySide;
+    @Getter
+    private MarketConfig marketConfig;
+
     /**
-     * Sell: best first = lowest price, then FIFO.
+     * 已应用的 {@link com.tk.protocol.dto.MarketUpdatePayload#getConfigVersion()}；-1 表示未经过 UPDATE_MARKET。
      */
-    private final TreeMap<BigDecimal, PriceLevel> sellSide;
-    private final Map<Long, BookOrder> ordersById;
+    @Getter
+    private long appliedMarketConfigVersion = -1L;
+
+    /**
+     * Bid：价格从高到低遍历用 {@link LongAdaptiveRadixTreeMap#forEachDesc} / {@link LongAdaptiveRadixTreeMap#getLowerValue(long)}。
+     */
+    private final LongAdaptiveRadixTreeMap<PriceLevel> buySide = new LongAdaptiveRadixTreeMap<>();
+    /**
+     * Ask：价格从低到高用 {@link LongAdaptiveRadixTreeMap#forEach} / {@link LongAdaptiveRadixTreeMap#getHigherValue(long)}。
+     */
+    private final LongAdaptiveRadixTreeMap<PriceLevel> sellSide = new LongAdaptiveRadixTreeMap<>();
+    @Getter
+    private final LongAdaptiveRadixTreeMap<BookOrder> ordersById = new LongAdaptiveRadixTreeMap<>();
+
+    @Getter
+    private transient int orderCount = 0;
+
+    private final OrderMatcher LIMIT_MATCHER = new LimitOrderMatcher(this);
+    private final OrderMatcher MARKET_MATCHER = new MarketOrderMatcher(this);
+    private final OrderMatcher LIMIT_MAKER_MATCHER = new LimitMakerOrderMatcher(this);
+
+
     @Setter
     @Getter
     private long reqOffset;
@@ -43,17 +75,10 @@ public final class OrderBook {
     @Getter
     private volatile long masterReqOffset;
 
-    /**
-     * 比对服务报告的 order_req 对齐进度（exclusive 语义与 {@link com.tk.match.compare.MatchResultSlaveFileQueue#replay} 的 min 一致）。
-     * 由 {@link com.tk.match.slot.event.ComparedEvent} 经 Disruptor 更新；切主时与 Kafka 尾部取较大值作为文件队列补发起始。
-     */
     @Setter
     @Getter
     private transient long comparedFileOffset;
 
-    /**
-     * 从节点 slave Chronicle 上已比对对齐到的文档索引（供切主补发 {@link com.tk.match.compare.MatchResultSlaveFileQueue#replay} 的 startIndexHint）；-1 表示未设置。
-     */
     @Setter
     @Getter
     private transient long comparedFileQueueStartIndex = -1L;
@@ -62,154 +87,275 @@ public final class OrderBook {
     @Setter
     private transient long snapshotOffset;
 
+    private static final int windowSize = 4;
+
+    private static final int windowInterval = 1000 * 60 * 15;
+    @Getter
+    private final transient ArrayDeque<Roaring64NavigableMapWrapper> navigableMapWrappers;
+
+    public OrderBook(String symbol, MarketConfig marketConfig) {
+        if (StringUtils.isEmpty(symbol) || marketConfig == null) {
+            throw new IllegalArgumentException("symbol is empty");
+        }
+        this.symbol = symbol;
+        this.marketConfig = marketConfig;
+        this.matchResultTopic = "match_result_" + symbol;
+        navigableMapWrappers = new ArrayDeque<>(windowSize);
+    }
+
     /**
-     * 仅当 {@code orderReqOffset} 大于当前 masterOffset 时更新，避免回退。线程安全。
+     * 从快照元数据恢复规则
      */
+    public void loadFromSnapshot(SnapshotLoadResult snapshotLoadResult, long configVersion) throws Exception {
+        if (snapshotLoadResult.snapshotMetadata().getMarketConfig() != null) {
+            this.marketConfig = snapshotLoadResult.snapshotMetadata().getMarketConfig();
+        }
+        SnapshotMetadata snapshotMetadata = snapshotLoadResult.snapshotMetadata();
+        if (snapshotMetadata.getNavigable() != null) {
+            for (Map.Entry<String, String> kv : snapshotMetadata.getNavigable().entrySet()) {
+                Long time = Long.valueOf(kv.getKey());
+                byte[] decode = Base64.getDecoder().decode(kv.getValue());
+                if (decode.length == 0) {
+                    log.warn("snapshot navigable blob empty, skip key={} symbol={}", kv.getKey(), symbol);
+                    continue;
+                }
+                Roaring64NavigableMap roaring64NavigableMap = new Roaring64NavigableMap();
+                try (ObjectInputStream objectInputStream = new ObjectInputStream(new ByteArrayInputStream(decode))) {
+                    roaring64NavigableMap.readExternal(objectInputStream);
+                }
+                roaring64NavigableMap.runOptimize();
+                Roaring64NavigableMapWrapper roaring64NavigableMapWrapper = new Roaring64NavigableMapWrapper();
+                roaring64NavigableMapWrapper.setTimestamp(time);
+                roaring64NavigableMapWrapper.setRoaring64NavigableMap(roaring64NavigableMap);
+                navigableMapWrappers.add(roaring64NavigableMapWrapper);
+            }
+        }
+        this.appliedMarketConfigVersion = configVersion;
+    }
+
+    /**
+     * 应用通过 {@code UPDATE_MARKET} 校验后的新配置。
+     */
+    public void applyMarketConfig(MarketConfig cfg, long configVersion) {
+        this.marketConfig = cfg;
+        this.appliedMarketConfigVersion = configVersion;
+    }
+
+    public boolean isEmpty() {
+        return orderCount <= 0;
+    }
+
+    /**
+     * 相对候选规则仍不合规的存量挂单（含 priceScale 变更时全部挂单）。
+     */
+    public List<BookOrder> findNonCompliantOrders(MarketConfig candidate) {
+        if (candidate == null) {
+            return List.of();
+        }
+        List<BookOrder> all = new ArrayList<>(exportOrders());
+        if (all.isEmpty()) {
+            return List.of();
+        }
+        if (candidate.getPriceScale() != marketConfig.getPriceScale()) {
+            return List.copyOf(all);
+        }
+        List<BookOrder> nonCompliant = new ArrayList<>();
+        for (BookOrder eachOrder : all) {
+            if (MarketRules.shouldRejectQuantity(eachOrder.getRemainingVolume(), candidate)) {
+                nonCompliant.add(eachOrder);
+            }
+        }
+        return nonCompliant;
+    }
+
+
     public void updateMasterReqOffsetIfGreater(long masterReqOffset) {
         if (this.masterReqOffset < masterReqOffset) {
             this.masterReqOffset = masterReqOffset;
         }
     }
 
-
-    public OrderBook(String symbol) {
-        if (StringUtils.isEmpty(symbol)) {
-            throw new IllegalArgumentException("symbol is empty");
-        }
-        this.buySide = new TreeMap<>(Comparator.reverseOrder());
-        this.sellSide = new TreeMap<>();
-        this.ordersById = new HashMap<>(64);
-        this.matchResultTopic = "match_result_" + symbol;
+    /**
+     * 最低卖价刻度；无档位返回 null。
+     */
+    public Long firstAskPriceTicks() {
+        final long[] capturedPriceTick = new long[1];
+        final boolean[] foundFirst = new boolean[1];
+        sellSide.forEach((priceTicks, priceLevel) -> {
+            capturedPriceTick[0] = priceTicks;
+            foundFirst[0] = true;
+        }, 1);
+        return foundFirst[0] ? capturedPriceTick[0] : null;
     }
 
     /**
-     * Process PUSH_ORDER: dispatch by priceType to LIMIT / MARKET / LIMIT_MAKER matcher.
-     *
-     * @param orderReqOffset Kafka partition offset of the order_req message (written to TradeOrder.matchId for all trades from this command).
+     * 最高买价刻度；无档位返回 null。
      */
-    public MatchResult pushOrder(OrderPayload payload, long orderReqOffset) {
-        if (payload == null) return emptyResult();
-        BigDecimal volume = effectiveVolume(payload);
-        if (volume == null || volume.compareTo(ZERO) <= 0) return emptyResult();
+    public Long firstBidPriceTicks() {
+        final long[] capturedPriceTick = new long[1];
+        final boolean[] foundFirst = new boolean[1];
+        buySide.forEachDesc((priceTicks, priceLevel) -> {
+            capturedPriceTick[0] = priceTicks;
+            foundFirst[0] = true;
+        }, 1);
+        return foundFirst[0] ? capturedPriceTick[0] : null;
+    }
 
-        BookOrder order = toBookOrder(payload, volume, orderReqOffset);
+    public PriceLevel levelAtAsk(long priceTicks) {
+        return sellSide.get(priceTicks);
+    }
+
+    public PriceLevel levelAtBid(long priceTicks) {
+        return buySide.get(priceTicks);
+    }
+
+    /**
+     * 严格高于 {@code priceTicks} 的下一卖价档位（用于吃单遍历）。
+     */
+    public Long nextAskAfter(long priceTicks) {
+        PriceLevel higherAskLevel = sellSide.getHigherValue(priceTicks);
+        return higherAskLevel == null ? null : higherAskLevel.getPriceTicks();
+    }
+
+    /**
+     * 严格低于 {@code priceTicks} 的下一买价档位。
+     */
+    public Long nextBidBelow(long priceTicks) {
+        PriceLevel lowerBidLevel = buySide.getLowerValue(priceTicks);
+        return lowerBidLevel == null ? null : lowerBidLevel.getPriceTicks();
+    }
+
+    public void removeAskLevelIfEmpty(long priceTicks) {
+        PriceLevel askLevel = sellSide.get(priceTicks);
+        if (askLevel != null && askLevel.isEmpty()) {
+            sellSide.remove(priceTicks);
+        }
+    }
+
+    public void removeBidLevelIfEmpty(long priceTicks) {
+        PriceLevel bidLevel = buySide.get(priceTicks);
+        if (bidLevel != null && bidLevel.isEmpty()) {
+            buySide.remove(priceTicks);
+        }
+    }
+
+    public MatchResult pushOrder(OrderPayload payload, long orderReqOffset, long timestamp) {
+
+        BookOrder takerOrder = new BookOrder(payload, orderReqOffset, marketConfig);
+
+        if (takerOrder.getOrderId() <= 0 || ordersById.get(takerOrder.getOrderId()) != null) {
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount())));
+        }
+        if (!navigableMapWrappers.isEmpty()) {
+            for (Roaring64NavigableMapWrapper navigableMapWrapper : navigableMapWrappers) {
+                if (navigableMapWrapper.getRoaring64NavigableMap().contains(takerOrder.getOrderId())) {
+                    return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount())));
+                }
+            }
+            Roaring64NavigableMapWrapper last = navigableMapWrappers.getLast();
+            if (timestamp / windowInterval == last.getTimestamp()) {
+                last.getRoaring64NavigableMap().add(takerOrder.getOrderId());
+            } else {
+                if (navigableMapWrappers.size() >= windowSize) {
+                    navigableMapWrappers.removeFirst();
+                }
+                Roaring64NavigableMapWrapper wrapper = new Roaring64NavigableMapWrapper(new Roaring64NavigableMap(), timestamp / windowInterval);
+                wrapper.getRoaring64NavigableMap().add(takerOrder.getOrderId());
+                navigableMapWrappers.add(wrapper);
+            }
+        } else {
+            Roaring64NavigableMapWrapper wrapper = new Roaring64NavigableMapWrapper(new Roaring64NavigableMap(), timestamp / windowInterval);
+            wrapper.getRoaring64NavigableMap().add(takerOrder.getOrderId());
+            navigableMapWrappers.add(wrapper);
+        }
 
         OrderMatcher matcher = selectMatcher(payload.getPriceType());
         if (matcher == null) {
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(order, FinishStatus.REJECT, volume)));
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount())));
         }
-        return matcher.match(this, order, orderReqOffset);
+        MatchResult invalid = matcher.validate(takerOrder);
+        if (invalid != null) {
+            return invalid;
+        }
+        return matcher.match(takerOrder, orderReqOffset);
     }
 
-    private static OrderMatcher selectMatcher(String priceType) {
+    private OrderMatcher selectMatcher(String priceType) {
         if (priceType == null) return null;
         return switch (priceType.toUpperCase()) {
             case "MARKET" -> MARKET_MATCHER;
-            case "LIMIT_MAKER" -> LIMIT_MATCHER;
-            case "POST_ONLY" -> LIMIT_MAKER_MATCHER;
+            case "LIMIT_MAKER", "POST_ONLY" -> LIMIT_MAKER_MATCHER;
             default -> LIMIT_MATCHER;
         };
     }
 
-    /**
-     * Process CANCEL_ORDER: remove from book and return FinishOrder.
-     */
     public MatchResult cancelOrder(Long orderId) {
-        BookOrder order = ordersById.remove(orderId);
-        if (order == null) return emptyResult();
-        removeFromBook(order);
-        FinishOrder fo = finishOrder(order, FinishStatus.CANCEL, order.getRemainingVolume());
+        BookOrder order = ordersById.get(orderId);
+        if (order == null) {
+            return emptyResult();
+        }
+        removeRestingOrder(order);
+        FinishOrder fo = MatchSupport.finishOrder(order, FinishStatus.CANCEL, order.getRemainingVolume());
         return MatchResult.of(Collections.emptyList(), List.of(fo));
     }
 
-    TreeMap<BigDecimal, PriceLevel> getBuySide() {
-        return buySide;
-    }
-
-    TreeMap<BigDecimal, PriceLevel> getSellSide() {
-        return sellSide;
-    }
-
-    Map<Long, BookOrder> getOrdersById() {
-        return ordersById;
-    }
-
     /**
-     * Best bid (highest buy price), or null if buy side empty.
+     * 从 id 索引与价位 FIFO 中移除已在簿上的订单，并维护 {@link #orderCount}。
+     * 用于撤单、maker 完全成交等路径；与 {@link #addToBook(BookOrder)} 成对。
      */
-    BigDecimal getBestBid() {
-        return buySide.isEmpty() ? null : buySide.firstKey();
+    public void removeRestingOrder(BookOrder order) {
+        if (ordersById.get(order.getOrderId()) == null) {
+            return;
+        }
+        ordersById.remove(order.getOrderId());
+        orderCount--;
+        removeFromBook(order);
     }
 
-    /**
-     * Best ask (lowest sell price), or null if sell side empty.
-     */
-    BigDecimal getBestAsk() {
-        return sellSide.isEmpty() ? null : sellSide.firstKey();
-    }
-
-    void addToBook(BookOrder order) {
-        TreeMap<BigDecimal, PriceLevel> book = order.isSideBuy() ? buySide : sellSide;
-        book.computeIfAbsent(order.getPrice(), k -> new PriceLevel()).addLast(order);
+    public void addToBook(BookOrder order) {
+        long ticks = order.getPriceTicks();
+        LongAdaptiveRadixTreeMap<PriceLevel> sideLevels = order.isSideBuy() ? buySide : sellSide;
+        PriceLevel priceLevel = sideLevels.get(ticks);
+        if (priceLevel == null) {
+            priceLevel = new PriceLevel(ticks);
+            sideLevels.put(ticks, priceLevel);
+        }
+        priceLevel.addLast(order);
         ordersById.put(order.getOrderId(), order);
+        orderCount++;
     }
 
-    void removeFromBook(BookOrder order) {
-        TreeMap<BigDecimal, PriceLevel> levelMap = order.isSideBuy() ? buySide : sellSide;
-        PriceLevel level = levelMap.get(order.getPrice());
+    public void removeFromBook(BookOrder order) {
+        long ticks = order.getPriceTicks();
+        LongAdaptiveRadixTreeMap<PriceLevel> levelMap = order.isSideBuy() ? buySide : sellSide;
+        PriceLevel level = levelMap.get(ticks);
         if (level != null) {
             level.remove(order.getSeq());
-            if (level.isEmpty()) levelMap.remove(order.getPrice());
+            if (level.isEmpty()) {
+                levelMap.remove(ticks);
+            }
         }
     }
 
-    /**
-     * Export all resting orders for snapshot (buy + sell, no guaranteed order).
-     * Caller should sort by seq when restoring.
-     */
     public Collection<BookOrder> exportOrders() {
-        return ordersById.values();
+        return ordersById.entriesList().stream().map(Map.Entry::getValue).toList();
     }
 
     /**
-     * Restore one order into the book without matching (for startup recovery).
+     * 按订单 ID 树遍历当前簿内挂单（单线程语义下使用）；用于快照写盘等场景，避免 {@link #exportOrders()} 分配整表集合。
      */
+    public void visitBookOrder(LongObjConsumer<BookOrder> consumer) {
+        ordersById.forEach(consumer, Integer.MAX_VALUE);
+    }
+
     public void restoreOrder(long orderId, long uid, int shardId, String side, BigDecimal price, BigDecimal remainingVolume, long seq) {
-        BookOrder order = new BookOrder(orderId, uid, shardId, side, price, remainingVolume, seq);
-        ordersById.put(order.getOrderId(), order);
+        long ticks = PriceCodec.encode(price, marketConfig.getPriceScale());
+        BookOrder order = new BookOrder(orderId, uid, shardId, side, price, ticks, remainingVolume, seq);
         addToBook(order);
-    }
-
-    private static BigDecimal effectiveVolume(OrderPayload p) {
-        if (p.getVolume() != null && p.getVolume().compareTo(ZERO) > 0) return p.getVolume();
-        if (p.getAmount() != null && p.getPrice() != null && p.getPrice().compareTo(ZERO) > 0) {
-            return p.getAmount().divide(p.getPrice(), 16, RoundingMode.DOWN);
-        }
-        return null;
-    }
-
-    private BookOrder toBookOrder(OrderPayload p, BigDecimal volume, long orderReqOffset) {
-        return new BookOrder(p.getId(), p.getUid(), p.getShardId(), p.getSide(), p.getPrice(), volume, orderReqOffset);
-    }
-
-    static TradeOrder buildTrade(long index, long orderReqOffset, BigDecimal price, BigDecimal volume, BookOrder taker, BookOrder maker) {
-        boolean takerBuy = taker.isSideBuy();
-        return TradeOrder.builder().index(index).orderReqOffset(orderReqOffset).price(price).volume(volume)
-                .buyUid(takerBuy ? taker.getUid() : maker.getUid())
-                .sellUid(takerBuy ? maker.getUid() : taker.getUid())
-                .buyOrderId(takerBuy ? taker.getOrderId() : maker.getOrderId())
-                .sellOrderId(takerBuy ? maker.getOrderId() : taker.getOrderId())
-                .takerOrderId(taker.getOrderId()).takerUid(taker.getUid())
-                .buyShardId(takerBuy ? taker.getShardId() : maker.getShardId())
-                .sellShardId(takerBuy ? maker.getShardId() : taker.getShardId()).build();
-    }
-
-    static FinishOrder finishOrder(BookOrder bookOrder, FinishStatus status, BigDecimal leaveVolume) {
-        return FinishOrder.builder().uid(bookOrder.getUid()).orderId(bookOrder.getOrderId()).shardId(bookOrder.getShardId()).status(status)
-                .leaveVolume(leaveVolume).leaveAmount(leaveVolume != null && bookOrder.getPrice() != null && leaveVolume.signum() > 0 ? leaveVolume.multiply(bookOrder.getPrice()) : null).build();
     }
 
     private static MatchResult emptyResult() {
         return MatchResult.of(Collections.emptyList(), Collections.emptyList());
     }
+
 }

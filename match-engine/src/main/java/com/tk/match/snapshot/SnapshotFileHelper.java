@@ -3,19 +3,22 @@ package com.tk.match.snapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.tk.match.engine.BookOrder;
+import com.tk.match.engine.OrderBook;
+import com.tk.match.engine.Roaring64NavigableMapWrapper;
+import com.tk.protocol.dto.MarketConfig;
+import org.roaringbitmap.longlong.Roaring64NavigableMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.ObjectOutputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.List;
+import java.util.*;
 import java.util.stream.Stream;
 
 /**
@@ -33,30 +36,75 @@ public final class SnapshotFileHelper {
     }
 
     /**
-     * Write snapshot to {snapshotDir}/{symbol}.{19-digit offset}.
-     * Write snapshot by appending line-by-line and flushing at end; avoids holding full file in memory.
+     * 写入快照，并在首行 metadata 中携带当前 {@link MarketConfig} 与已应用版本（设计 §10）。
+     * <p>
+     * 通过 {@link OrderBook#visitBookOrder} 逐个遍历挂单写入，避免一次性 {@link OrderBook#exportOrders()} 分配整表集合。
      */
-    public static void write(Path snapshotDir, String symbol, long offset, Collection<BookOrder> orders) throws IOException {
+    public static void write(Path snapshotDir, String symbol, long offset, OrderBook book,
+                             MarketConfig marketConfig, long appliedMarketConfigVersion) throws IOException {
         if (snapshotDir == null) throw new IOException("snapshotDir is null");
+        if (book == null) throw new IOException("book is null");
         Files.createDirectories(snapshotDir);
         String fileName = symbol + "." + String.format("%019d", offset);
         Path file = snapshotDir.resolve(fileName);
-        SnapshotMetadata meta = SnapshotMetadata.builder()
-                .offset(offset)
-                .orderCount(orders.size())
-                .symbol(symbol)
-                .ts(System.currentTimeMillis())
-                .build();
+        int orderCount = book.getOrderCount();
+
+        SnapshotMetadata meta = buildMetadata(offset, symbol, orderCount, marketConfig, appliedMarketConfigVersion, book);
         try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
             w.write(MAPPER.writeValueAsString(meta));
             w.newLine();
-            for (BookOrder o : orders) {
-                w.write(MAPPER.writeValueAsString(o));
-                w.newLine();
+            IOException[] writeErr = new IOException[1];
+            book.visitBookOrder((id, o) -> {
+                if (writeErr[0] != null) {
+                    return;
+                }
+                try {
+                    w.write(MAPPER.writeValueAsString(o));
+                    w.newLine();
+                } catch (IOException e) {
+                    writeErr[0] = e;
+                }
+            });
+            if (writeErr[0] != null) {
+                throw writeErr[0];
             }
             w.flush();
         }
-        log.debug("Snapshot written symbol={} offset={} orders={} path={}", symbol, offset, orders.size(), file);
+        log.debug("Snapshot written symbol={} offset={} orders={} path={}", symbol, offset, orderCount, file);
+    }
+
+    private static SnapshotMetadata buildMetadata(long offset, String symbol, int orderCount,
+                                                  MarketConfig marketConfig, long appliedMarketConfigVersion, OrderBook book) throws IOException {
+
+        SnapshotMetadata.SnapshotMetadataBuilder mb = SnapshotMetadata.builder()
+                .offset(offset)
+                .orderCount(orderCount)
+                .symbol(symbol)
+                .ts(System.currentTimeMillis())
+                .metadataVersion(1);
+        if (marketConfig != null) {
+            mb.marketConfig(marketConfig);
+        }
+        if (appliedMarketConfigVersion >= 0) {
+            mb.marketConfigVersion(appliedMarketConfigVersion);
+        }
+        ArrayDeque<Roaring64NavigableMapWrapper> navigableMapWrappers = book.getNavigableMapWrappers();
+        if (!navigableMapWrappers.isEmpty()) {
+            LinkedHashMap<String, String> navigable = new LinkedHashMap<>();
+            for (Roaring64NavigableMapWrapper navigableMapWrapper : navigableMapWrappers) {
+                Roaring64NavigableMap roaring64 = navigableMapWrapper.getRoaring64NavigableMap();
+                roaring64.runOptimize();
+                ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+                // 必须 close ObjectOutputStream，否则缓冲区未刷入，反序列化会 EOFException
+                try (ObjectOutputStream oos = new ObjectOutputStream(byteArrayOutputStream)) {
+                    roaring64.writeExternal(oos);
+                }
+                String value = Base64.getEncoder().encodeToString(byteArrayOutputStream.toByteArray());
+                navigable.put(String.valueOf(navigableMapWrapper.getTimestamp()), value);
+            }
+            mb.navigable(navigable);
+        }
+        return mb.build();
     }
 
     /**
@@ -140,7 +188,8 @@ public final class SnapshotFileHelper {
                 orderList.add(order);
             }
             orderList.sort(Comparator.comparingLong(BookOrder::getSeq));
-            return new SnapshotLoadResult(meta.getOffset(), orderList);
+            long cfgVer = meta.getMarketConfigVersion() != null ? meta.getMarketConfigVersion() : -1L;
+            return new SnapshotLoadResult(meta.getOffset(), orderList, meta, cfgVer);
         } catch (Exception e) {
             log.debug("Snapshot loadOne failed path={}", file, e);
             return null;

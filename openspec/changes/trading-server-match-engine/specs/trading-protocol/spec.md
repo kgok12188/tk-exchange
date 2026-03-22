@@ -6,9 +6,30 @@ The system SHALL define a set of shared DTOs for the trading pipeline so that `t
 #### Scenario: Order commands are standardized
 - **WHEN** `trading-server` sends a request to `match-engine`
 - **THEN** it SHALL use an `OrderCommand` object with a `type` of either `PUSH_ORDER` or `CANCEL_ORDER`
-- **AND** `PUSH_ORDER` SHALL include `id`, `uid`, `symbol` (or `marketId`), `side`, `priceType`, `price`, and either `volume` or `amount`
+- **AND** `PUSH_ORDER` SHALL include `id`, `uid`, `symbol` (or `marketId`), `side`, `priceType`, and sizing fields per `priceType` (see MARKET scenarios); `LIMIT` typically requires `price` and `volume` and/or `amount`
 - **AND** `priceType` SHALL be one of: `LIMIT`, `MARKET`, `LIMIT_MAKER` (post-only)
 - **AND** `CANCEL_ORDER` SHALL include at least `orderId`
+
+#### Scenario: Market pair base/quote and OrderPayload sizing
+- **WHEN** a trading pair is expressed as e.g. `BTC_USDT`
+- **THEN** the **base** asset SHALL be BTC and the **quote** asset SHALL be USDT for human and product semantics
+- **AND** `OrderPayload.volume` and match-engine internal remaining quantity SHALL be interpreted as **base quantity** (BTC)
+- **AND** `OrderPayload.amount` SHALL be interpreted as **quote notional** (USDT) when used to derive base quantity
+- **AND** account locking of **quote** for buys and **base** for sells SHALL be performed outside the match-engine (trading-server / wallet), consistent with this model
+
+#### Scenario: MARKET BUY — required quote budget and optional base cap
+- **WHEN** `priceType` = `MARKET` and `side` = `BUY`
+- **THEN** `amount` (quote, max spend) SHALL be **required** and positive
+- **AND** `volume` (base) MAY be omitted or zero meaning **no** explicit base cap; if `volume` > 0 it SHALL cap total filled **base** and SHALL NOT be exceeded
+- **AND** each fill SHALL respect both remaining quote budget and optional base cap (whichever binds first)
+- **AND** if there is **no ask liquidity** at entry, the engine SHALL reject or otherwise not produce trades (no resting order)
+- **AND** the order SHALL NOT rest on the book (IOC): terminal state includes `PART_CANCEL` / `COMPLETED` as applicable; `leaveVolume` for base-uncapped BUY on partial IOC MAY be zero in base units (unspent quote is a wallet concern)
+
+#### Scenario: MARKET SELL — required base and optional quote cap
+- **WHEN** `priceType` = `MARKET` and `side` = `SELL`
+- **THEN** `volume` (base, max sell quantity) SHALL be **required** and positive
+- **AND** `amount` (quote) MAY be omitted or zero meaning **no** cumulative quote cap; if `amount` > 0 it SHALL cap **cumulative** filled quote (Σ price×volume) and SHALL NOT be exceeded
+- **AND** the order SHALL NOT rest on the book (IOC)
 
 #### Scenario: LIMIT_MAKER (post-only) orders are rejected when they would cross
 - **WHEN** `match-engine` receives a `PUSH_ORDER` with `priceType` = `LIMIT_MAKER`
@@ -68,4 +89,13 @@ Each `FinishOrder` SHALL describe the final state of an order including remainin
   - the `FinishOrder` entries in the `TradingSettle`
   - the `Ticket` entries in the `TradingSettle`
   - its own internal state and configuration (e.g. fee schedules, risk parameters)
+
+### Requirement: MarketConfig exposes optional quote notional threshold for market-order display completion
+The system SHALL expose **`minTradableQuoteNotional`** on **`MarketConfig`** (per symbol) as an optional **BigDecimal** in **quote** units (e.g. USDT for `BTC_USDT`).
+
+#### Scenario: Below-threshold remaining quote notional is treated as non-tradable / display-complete
+- **WHEN** `minTradableQuoteNotional` is set to a **positive** value
+- **THEN** the product SHALL treat a market order as **display-complete / not further tradable** when the **remaining tradable notional in quote** is **strictly less than** (`<`) `minTradableQuoteNotional`
+- **AND** `null` or **non-positive** `minTradableQuoteNotional` SHALL mean this rule is **disabled**
+- **NOTE**: This does **not** replace match-engine terminal status (`PART_CANCEL` / `COMPLETED`); it is a **business-layer** interpretation for UX and wallet/unlock semantics where applicable.
 

@@ -18,6 +18,7 @@ public final class SlotTaskEvent {
     private String symbol;
     private String rawJson;
     private long orderReqOffset;
+    private long timestamp;
     private HaEvent haEvent;
     private long compareOffset;
     /**
@@ -25,11 +26,12 @@ public final class SlotTaskEvent {
      */
     private long compareQueueIndex = -1L;
 
-    public void setOrder(String symbol, String rawJson, long orderReqOffset) {
+    public void setOrder(String symbol, String rawJson, long orderReqOffset, long timestamp) {
         this.type = Type.ORDER;
         this.symbol = symbol;
         this.rawJson = rawJson;
         this.orderReqOffset = orderReqOffset;
+        this.timestamp = timestamp;
         this.haEvent = null;
     }
 

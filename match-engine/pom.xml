@@ -87,6 +87,11 @@
             <artifactId>commons-lang3</artifactId>
         </dependency>
         <dependency>
+            <groupId>exchange.core2</groupId>
+            <artifactId>collections</artifactId>
+            <version>0.5.1</version>
+        </dependency>
+        <dependency>
             <groupId>mysql</groupId>
             <artifactId>mysql-connector-java</artifactId>
             <version>8.0.33</version>

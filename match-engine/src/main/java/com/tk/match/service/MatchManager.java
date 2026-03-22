@@ -75,7 +75,7 @@ public class MatchManager {
     }
 
     @PostConstruct
-    public void start() {
+    public void start() throws Exception {
         if (symbols == null || symbols.isEmpty()) {
             log.warn("match.symbols empty, MatchManager not started");
             return;

@@ -319,7 +319,7 @@ worker / ringBuffer 带来的并行性**仅发生在不同 symbol 之间**，不
 **快照文件内容与写入**
 
 - **第 1 行**：快照元数据（单行 JSON，`SnapshotMetadata`）：`offset`、`orderCount`、`symbol`、`ts`。
-- **第 2 行起**：每行一个 **BookOrder** 的 JSON（直接序列化内存中的 `BookOrder`），字段含：orderId、uid、shardId、side、price、remainingVolume、volume、seq、sideBuy；**金额字段**（price、remainingVolume、volume）以 **plain string** 形式写入（`BigDecimal.toPlainString()`），避免精度与科学计数法问题；字符集 **UTF-8**。
+- **第 2 行起**：每行一个 **BookOrder** 的 JSON（直接序列化内存中的 `BookOrder`），字段含：orderId、uid、shardId、side、price、remainingVolume、volume、seq、sideBuy；市价 IOC 相关字段 `amount` / `remainingAmount`（quote）若存在可一并序列化；**金额字段**（price、remainingVolume、volume 等）以 **plain string** 形式写入（`BigDecimal.toPlainString()`），避免精度与科学计数法问题；字符集 **UTF-8**。
 - **写入方式**：使用 **流式写入**（`BufferedWriter`），按行追加，最后 `flush()`，不将整份文件内容放入内存；文件编码 UTF-8。
 
 **加载与校验（load）**
@@ -347,7 +347,7 @@ worker / ringBuffer 带来的并行性**仅发生在不同 symbol 之间**，不
 - **配置**：`match.snapshot-enabled`（是否启用定时快照）、`match.snapshot-dir`（目录，与启用一起生效）、`match.snapshot-interval-ms`（间隔毫秒，默认 300000）；另有 `match.snapshot-interval-minutes`（分钟，优先级低于 interval-ms）。
 - **定时任务**：`SnapshotScheduleService` 使用 **`@Scheduled(fixedDelayString = "${match.snapshot-interval-ms:300000}", initialDelay = 60_000)`**，即首次延迟 60 秒后按间隔执行；仅当 `snapshotEnabled && snapshotDir 非空` 时执行。
 - **流程**：对每个 slot 调用 `MatchManager.getSymbolsBySlotIndex(i)` 得到该 slot 当前 symbol 集合，对每个 symbol 调用 `MatchManager.submitSnapshotRequest(symbol)`；请求投递到对应 slot 的 **queue**（与 order_req 同队，`SlotTask.snapshot(symbol)`），由 worker 按序执行。
-- **写盘**：worker 执行 `takeSnapshot(symbol)` 时，取 `book.getReqOffset()` 与 `book.exportOrders()`，调用 `SnapshotFileHelper.write(snapshotDir, symbol, offset, orders)`；一致点为当前已处理的 order_req offset。
+- **写盘**：worker 执行 `takeSnapshot(symbol)` 时，取 `book.getReqOffset()`，通过 `book.visitBookOrder(...)` 逐个遍历挂单写入快照，调用 `SnapshotFileHelper.write(snapshotDir, symbol, offset, book, ...)`（内部先计数再写行，避免一次性 `exportOrders()` 分配整表集合）；一致点为当前已处理的 order_req offset。
 
 #### 3.6.7 match-engine 主从与高可用（设计约定）
 
@@ -399,6 +399,7 @@ worker / ringBuffer 带来的并行性**仅发生在不同 symbol 之间**，不
   - **倒推 N 条**：在区间 `(end - N, end]` 内，对每个 orderReqOffset 在两条队列中取对应 record，逐条比较 payload。
   - 若某 orderReqOffset 仅在一侧存在，可记缺失并打 error；若两侧都有但 payload 不一致，打 **error** 日志（含 symbol、orderReqOffset、差异摘要），便于人工介入和排查。
 - **行为**：仅读两条队列、比对、输出日志或指标；不修改 Chronicle 队列文件。抽样**全部一致**时可通过 `MatchManager.updateComparedProgressFromConsistencyCheck` 更新 OrderBook 对齐进度；主从角色仍由选主与 slot HA 决定。调度侧仅当 **`MatchManager.anyMaster()` 为 false**（没有任何 slot 为主，通常即整实例为从）时执行比对（`MatchResultChecker`）；切主过程中若已存在任一 slot 为主则本轮跳过比对。
+- **并发与数据来源（约定）**：每个 symbol 的 **OrderBook** 仅在 **MatchSlot worker** 单线程路径上读写与变更；**禁止**多线程并发修改同一 **OrderBook**。主从一致性抽样比对**仅针对已落盘**的 **`{file-queue-dir}/slave/{symbol}`** 与 **`{file-queue-dir}/master/{symbol}`** Chronicle 队列记录，**不在**比对路径上直接对比两份内存 **OrderBook**；比对任务只读磁盘队列，与撮合热路径解耦，**不应**与 worker 对同一簿产生并发争用。
 
 ---
 
@@ -626,3 +627,9 @@ trading-server 通过 **trading_result_(分区)** 输出内存变更，由 **tra
 - 步骤 5、6 在 1–4 跑通后再完善即可。
 
 **当前可复用**：open_api 写 trading_(分区)、MessageQueueService 按 uid 槽位消费、RingBufferTradingBook/UserTradingBook 结构、match-engine 全流程、flush-service 的 DataSynchronizationService 消费 trading_result_(分区) 落库、UserDataService.sendToMq 与 AsyncMessageItem 格式。**实现 NEW_ORDER/MATCH 及 sendToMq、response 时，需根据 Zookeeper 主从状态判断：仅主节点写入 trading_result_(分区)（多 partition，每 ringBuffer 写各自 partition）与 response（按需）、order_req_(币对)（按需）。所有 Kafka topic 命名统一使用下划线。**
+
+---
+
+## 11. 相关文档
+
+- [市价单与交易对资产语义](doc/市价单与交易对资产语义.md)（BTC_USDT 示例：base/quote、市价 IOC 与业务锁仓、`OrderPayload` 字段；`MarketConfig.minTradableQuoteNotional`：剩余 quote 名义 **&lt;** 阈值时业务完单）

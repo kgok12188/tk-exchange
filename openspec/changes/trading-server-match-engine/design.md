@@ -127,12 +127,12 @@ trading-server (settlement)
 ### 8. 订单簿快照与启动恢复
 
 - **Decision**：快照用于**启动恢复**；存储于**共享磁盘**目录，由配置 **`match.snapshot-dir`** 指定；为空时禁用快照与恢复。文件名 `{symbol}.{19位offset，前缀补0}`（如 `BTC_USDT.0000000000000123456`），约定币对名称中不含 `.`；offset 表示 **已处理到的** order_req 消息 offset。
-- **快照内容**：第 1 行为快照元数据（单行 JSON，SnapshotMetadata）：`offset`、`orderCount`、`symbol`、`ts`。第 2 行起每行一个 **BookOrder** 的 JSON（与内存结构一致，含 orderId, uid, shardId, side, price, remainingVolume, volume, seq, sideBuy）；金额字段以 **plain string** 存储（BigDecimal.toPlainString），字符集 **UTF-8**。空订单簿时仅第 1 行且 `orderCount=0`。
+- **快照内容**：第 1 行为快照元数据（单行 JSON，SnapshotMetadata）：`offset`、`orderCount`、`symbol`、`ts`；**可选扩展** **`marketConfig`**（见 **§10**）：与挂单同属该 offset 一致点下的「撮合规则」，加载时与 `BookOrder` 一并恢复。第 2 行起每行一个 **BookOrder** 的 JSON（与内存结构一致，含 orderId, uid, shardId, side, price, remainingVolume, volume, seq, sideBuy）；金额字段以 **plain string** 存储（BigDecimal.toPlainString），字符集 **UTF-8**。空订单簿时仅第 1 行且 `orderCount=0`。**老快照**无 `marketConfig` 时实现可回退到进程默认（如全局 `match.price-scale`），并在加载时用 metadata 中的 scale 解释订单，避免与当前默认不一致。
 - **写入方式**：**流式写入**（BufferedWriter），按行追加，UTF-8，最后 flush，不将整份文件内容放入内存。
 - **加载与校验**：在快照目录下匹配 `{symbol}.{19位数字}` 的候选文件，按 offset **降序**排列；**依次尝试**候选 0、1、2…，对每个候选做**有效性校验**（文件可读、非空、metadata 合法、订单行数=orderCount、文件名 offset 与 metadata 一致、每行订单可解析且合法）；第一个全部通过的候选作为加载结果；反序列化后按 **seq 升序排序**，依次 **restoreOrder** 重建 OrderBook。
 - **恢复与 seek**：设置 OrderBook 的 reqOffset = 快照 offset；consumer 对 `order_req_(symbol)` **seek(offset + 1)** 后继续消费（因快照 offset 为「已处理到的」，下一次应从下一条消息开始，避免重复处理）。
 - **打快照触发**：配置 `match.snapshot-enabled`、`match.snapshot-dir`、`match.snapshot-interval-ms`（默认 300000）；定时任务（如 fixedDelay，initialDelay 60s）调用 `MatchManager.getSymbolsBySlotIndex(slotIndex)` 获取各 slot 币对，对每个 symbol 调用 `MatchManager.submitSnapshotRequest(symbol)`；请求投递到对应 slot 的 queue（与 order_req 同队），由 worker 按序执行，写盘时使用当前已处理的 order_req offset 作为一致点。
-- **与代码的对应**：MatchManager 暴露 `getSymbolsBySlotIndex(int)`、`submitSnapshotRequest(String symbol)`；MatchSlot 支持 SnapshotTask 入队及 worker 分支 `takeSnapshot(symbol)` 写盘；SnapshotFileHelper 负责 write（流式/UTF-8）、load（多候选+校验）、PlainStringBigDecimalSerializer；OrderBook 支持 exportOrders()、**restoreOrder(...)** 仅挂入买卖盘不撮合、getReqOffset/setReqOffset。
+- **与代码的对应**：MatchManager 暴露 `getSymbolsBySlotIndex(int)`、`submitSnapshotRequest(String symbol)`；MatchSlot 支持 SnapshotTask 入队及 worker 分支 `takeSnapshot(symbol)` 写盘；SnapshotFileHelper 负责 write（`OrderBook#visitBookOrder` 逐单写入、UTF-8）、load（多候选+校验）、PlainStringBigDecimalSerializer；OrderBook 支持 `visitBookOrder` / `exportOrders()`、**restoreOrder(...)** 仅挂入买卖盘不撮合、getReqOffset/setReqOffset。
 
 ### 9. match-engine 主从与高可用
 
@@ -157,7 +157,20 @@ trading-server (settlement)
     - **倒推 N 条**：在区间 `(end - N, end]` 内，对每个 orderReqOffset 在两条队列中取对应 record，逐条比较 payload。
     - 若某 orderReqOffset 仅在一侧存在，可记缺失并打 error；若两侧都有但 payload 不一致，打 **error** 日志（含 symbol、orderReqOffset、差异摘要），便于人工介入和排查。
   - **行为**：仅读两条队列、比对、输出日志或指标；不修改 Chronicle 队列文件；抽样全部一致时可 `updateComparedProgressFromConsistencyCheck` 更新 OrderBook；主从角色仍由选主与 slot HA 决定。定时任务仅在 **`MatchManager.anyMaster()` 为 false** 时跑比对（`MatchResultChecker`）；任一条 slot 为主则跳过本轮。
+  - **并发与数据来源（约定）**：每个 symbol 的 **OrderBook** 仅在 **MatchSlot worker** 单线程路径上读写与变更；**禁止**多线程并发修改同一 **OrderBook**。主从一致性抽样比对**仅针对已落盘**的 **`{file-queue-dir}/slave/{symbol}`** 与 **`{file-queue-dir}/master/{symbol}`** Chronicle 队列记录，**不在**比对逻辑中直接对比两份内存 **OrderBook**；比对任务只读磁盘队列，与撮合热路径解耦，**不应**与 worker 对同一簿产生并发争用。
 - **Rationale**：与 trading-server 主从模型一致（实例级 + ZK）；从写文件队列降低对 Kafka 的依赖并保留可补发缓冲；masterOffset 统一「主已对外可见进度」的语义；每币一队列 + 统一格式便于实现与补发对齐；抽样比对在不影响主路径的前提下提供一致性校验与人工排查入口。
+
+### 10. 市场参数 MarketConfig、order_req 下发与快照一致性
+
+- **Decision（数据模型）**：每个可交易 symbol 对应一份 **MarketConfig**（或等价「合约/市场规格」），至少包含：**symbol**、**priceScale**（价格定点小数位，与内部 long 刻度/订单簿索引一致）、**qtyScale**（数量小数位）、**step**（数量步长 / lot）、**minQty**（单笔最小委托量）、**minTradableQuoteNotional**（可选，市价 **业务完单** 用：在 **quote** 下若剩余可成交名义 **&lt;** 该值则视为不可再成交/展示完单；`null` 或 ≤0 表示不启用）。**数量规则**：约定 **minQty 为 step 的正整数倍**，有效委托量 **为 step 的整数倍**且 **≥ minQty**（除非产品另有 dust/舍入规则，需在 spec 中单写）。
+- **Decision（真相来源与顺序）**：MarketConfig 的演进应作为 **`order_req_(symbol)`** 上的**有序指令**（需扩展 `OrderCommand`：如 **UPDATE_MARKET** / 管理类载荷，与 PUSH/CANCEL 共用同一 topic、同一分区），与撮合指令**全序**处理，保证多实例重放一致。权威配置可在 trading-server / 管理端维护，match-engine 只消费**只读镜像**。
+- **Decision（变更前置条件）**：应用**新** MarketConfig 前，在**当前订单簿**上扫描**存量挂单**是否满足**新**规则。若存在不合规挂单：
+  - **非强制**：**不应用**新配置，保持旧 MarketConfig（可向上游返回原因：存在阻塞单）。
+  - **强制**：先对不合规单执行**撤单/终态**（产出相应 `FinishOrder`），再**原子切换**为新 MarketConfig；切换临界区内应定义是否拒新单或仍按旧规收单（产品决策，须在实现与 spec 中一致）。
+  - **幂等**：配置消息携带 **configVersion** 或等价序号，避免重复投递导致重复批量撤单。
+- **Decision（快照 §8 扩展 A）**：将 **MarketConfig** 写入 **SnapshotMetadata**（同一快照文件**第 1 行 JSON** 的扩展字段，如 `marketConfig`），与 **该 symbol、该 offset** 的挂单切片**绑定**。**不变量**：快照中的 `marketConfig` = 处理完 **≤ offset** 的全部 `order_req`（含配置类消息）后**当前生效**的规则；冷启动 `load` 后 **`seek(offset+1)`** 时，下一条消息应在**同一套**规则下继续演进。Kafka 流为长期真相；快照为加速恢复，避免从零重放全部配置指令。
+- **Decision（兼容）**：旧快照缺少 `marketConfig` 时回退默认；metadata 可增加 **`metadataVersion`** 便于字段演进。
+- **Rationale**：规则与订单簿强耦合；仅恢复挂单不恢复规则会导致 **BigDecimal/long 刻度、步长校验** 与运行时错位；将 MarketConfig 纳入 metadata 与「单文件 per symbol」运维模型一致；与 order_req 同序下发避免配置与撮合乱序。
 
 ## Risks / Trade-offs
 
@@ -172,4 +185,7 @@ trading-server (settlement)
 
 - **[Risk] match-engine 与 message-dispatch 之间的一致性问题**  
   **Mitigation**：以 Kafka offset 为基础做 at-least-once 处理，并依靠 `index + orderReqOffset`（即 order_req offset，协议中可为 matchId）做幂等；必要时在 TradingSettle 中携带幂等 key。
+
+- **[Risk] MarketConfig 与 `order_req` 协议扩展、快照 metadata 演进**  
+  **Mitigation**：在 `trading-protocol` 中为配置变更指令单独建模并版本化；SnapshotMetadata 使用 `metadataVersion` / 可选 `marketConfig` 块；集成测试覆盖「旧快照无 marketConfig」「强制变更撤单」「seek 后规则连续」。
 
