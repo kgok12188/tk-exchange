@@ -76,8 +76,8 @@ public class MatchResultTailQueryService {
                 long end = consumer.position(tp);
                 Long begin = consumer.beginningOffsets(Lists.newArrayList(tp)).get(tp);
                 if (end > begin) {
-                    endMap.put(tp.topic(), end);
-                    consumer.seek(tp, Math.max(end - 5, begin));
+                    endMap.put(tp.topic(), end - 1);
+                    consumer.seek(tp, Math.max(end - 10, begin));
                 }
             }
             while (!endMap.isEmpty()) {
