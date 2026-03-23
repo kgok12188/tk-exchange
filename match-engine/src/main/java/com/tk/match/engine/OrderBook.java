@@ -3,23 +3,13 @@ package com.tk.match.engine;
 import com.tk.match.engine.matcher.*;
 import com.tk.match.snapshot.SnapshotLoadResult;
 import com.tk.match.snapshot.SnapshotMetadata;
-import com.tk.protocol.dto.FinishOrder;
-import com.tk.protocol.dto.FinishStatus;
-import com.tk.protocol.dto.MarketConfig;
-import com.tk.protocol.dto.OrderPayload;
-import com.tk.protocol.dto.RejectReason;
-import com.tk.protocol.dto.TimeInForce;
+import com.tk.protocol.dto.*;
 import exchange.core2.collections.art.LongAdaptiveRadixTreeMap;
 import exchange.core2.collections.art.LongObjConsumer;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.commons.lang3.StringUtils;
-import org.roaringbitmap.longlong.Roaring64NavigableMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayInputStream;
-import java.io.ObjectInputStream;
 import java.math.BigDecimal;
 import java.util.*;
 
@@ -30,8 +20,6 @@ import static com.tk.match.engine.matcher.MatchSupport.finishOrder;
  * 价格档位索引使用 {@link LongAdaptiveRadixTreeMap}（long 定点刻度键，借鉴 exchange-core）；档内仍为 FIFO {@link PriceLevel}。
  */
 public final class OrderBook {
-
-    private static final Logger log = LoggerFactory.getLogger(OrderBook.class);
 
     @Getter
     private String matchResultTopic;
@@ -91,11 +79,9 @@ public final class OrderBook {
     @Setter
     private transient long snapshotOffset;
 
-    private static final int windowSize = 4;
-
-    private static final int windowInterval = 1000 * 60 * 15;
-    @Getter
-    private final transient ArrayDeque<Roaring64NavigableMapWrapper> navigableMapWrappers;
+    private static final int DUPLICATE_ID_WINDOW_SIZE = 4;
+    private static final int DUPLICATE_ID_WINDOW_INTERVAL_MILLIS = 1000 * 60 * 15;
+    private final transient OrderIdDeduplicate orderIdDeduplicate;
 
     public OrderBook(String symbol, MarketConfig marketConfig) {
         if (StringUtils.isEmpty(symbol) || marketConfig == null) {
@@ -104,7 +90,7 @@ public final class OrderBook {
         this.symbol = symbol;
         this.marketConfig = marketConfig;
         this.matchResultTopic = "match_result_" + symbol;
-        navigableMapWrappers = new ArrayDeque<>(windowSize);
+        orderIdDeduplicate = new OrderIdDeduplicate(DUPLICATE_ID_WINDOW_SIZE, DUPLICATE_ID_WINDOW_INTERVAL_MILLIS);
     }
 
     /**
@@ -115,25 +101,7 @@ public final class OrderBook {
             this.marketConfig = snapshotLoadResult.snapshotMetadata().getMarketConfig();
         }
         SnapshotMetadata snapshotMetadata = snapshotLoadResult.snapshotMetadata();
-        if (snapshotMetadata.getNavigable() != null) {
-            for (Map.Entry<String, String> kv : snapshotMetadata.getNavigable().entrySet()) {
-                Long time = Long.valueOf(kv.getKey());
-                byte[] decode = Base64.getDecoder().decode(kv.getValue());
-                if (decode.length == 0) {
-                    log.warn("snapshot navigable blob empty, skip key={} symbol={}", kv.getKey(), symbol);
-                    continue;
-                }
-                Roaring64NavigableMap roaring64NavigableMap = new Roaring64NavigableMap();
-                try (ObjectInputStream objectInputStream = new ObjectInputStream(new ByteArrayInputStream(decode))) {
-                    roaring64NavigableMap.readExternal(objectInputStream);
-                }
-                roaring64NavigableMap.runOptimize();
-                Roaring64NavigableMapWrapper roaring64NavigableMapWrapper = new Roaring64NavigableMapWrapper();
-                roaring64NavigableMapWrapper.setTimestamp(time);
-                roaring64NavigableMapWrapper.setRoaring64NavigableMap(roaring64NavigableMap);
-                navigableMapWrappers.add(roaring64NavigableMapWrapper);
-            }
-        }
+        orderIdDeduplicate.loadFromSnapshot(snapshotMetadata.getNavigable(), symbol);
         this.appliedMarketConfigVersion = configVersion;
     }
 
@@ -247,37 +215,15 @@ public final class OrderBook {
 
         BookOrder takerOrder = new BookOrder(payload, orderReqOffset, marketConfig);
 
-        if (payload.getCreateTime() + marketConfig.getMaxValidTime() < System.currentTimeMillis()) {
+        if ((timestamp - payload.getCreateTime()) > marketConfig.getMaxValidTime() || payload.getCreateTime() > timestamp) {
             return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.ORDER_EXPIRED)));
         }
 
-        if (takerOrder.getOrderId() <= 0 || ordersById.get(takerOrder.getOrderId()) != null) {
-            RejectReason rejectReason = takerOrder.getOrderId() <= 0 ? RejectReason.INVALID_ORDER_ID : RejectReason.DUPLICATE_ORDER_ID;
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), rejectReason)));
+        if (takerOrder.getOrderId() <= 0) {
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_ORDER_ID)));
         }
-
-        if (!navigableMapWrappers.isEmpty()) {
-            for (Roaring64NavigableMapWrapper navigableMapWrapper : navigableMapWrappers) {
-                if (navigableMapWrapper.getRoaring64NavigableMap().contains(takerOrder.getOrderId())) {
-                    return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.DUPLICATE_ORDER_ID)));
-                }
-            }
-            Roaring64NavigableMapWrapper last = navigableMapWrappers.getLast();
-            long timeIndex = timestamp / windowInterval;
-            if (timeIndex == last.getTimestamp()) {
-                last.getRoaring64NavigableMap().add(takerOrder.getOrderId());
-            } else {
-                if (navigableMapWrappers.size() >= windowSize) {
-                    navigableMapWrappers.removeFirst();
-                }
-                Roaring64NavigableMapWrapper wrapper = new Roaring64NavigableMapWrapper(new Roaring64NavigableMap(), timeIndex);
-                wrapper.getRoaring64NavigableMap().add(takerOrder.getOrderId());
-                navigableMapWrappers.add(wrapper);
-            }
-        } else {
-            Roaring64NavigableMapWrapper wrapper = new Roaring64NavigableMapWrapper(new Roaring64NavigableMap(), timestamp / windowInterval);
-            wrapper.getRoaring64NavigableMap().add(takerOrder.getOrderId());
-            navigableMapWrappers.add(wrapper);
+        if (orderIdDeduplicate.isDuplicate(takerOrder.getOrderId(), ordersById, timestamp)) {
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.DUPLICATE_ORDER_ID)));
         }
 
         TimeInForce timeInForce = TimeInForce.fromWire(payload.getTimeInForce());
@@ -380,6 +326,10 @@ public final class OrderBook {
      */
     public void visitBookOrder(LongObjConsumer<BookOrder> consumer) {
         ordersById.forEach(consumer, Integer.MAX_VALUE);
+    }
+
+    public ArrayDeque<Roaring64NavigableMapWrapper> getNavigableMapWrappers() {
+        return orderIdDeduplicate.recentOrderIdWindows();
     }
 
     public void restoreOrder(long orderId, long uid, int shardId, String side, BigDecimal price, BigDecimal remainingVolume, long seq) {
