@@ -1,5 +1,6 @@
 package com.tk.match.service;
 
+import com.google.common.collect.Lists;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -73,9 +74,10 @@ public class MatchResultTailQueryService {
             HashMap<String, Long> endMap = new HashMap<>();
             for (TopicPartition tp : partitions) {
                 long end = consumer.position(tp);
-                if (end > 0) {
+                Long begin = consumer.beginningOffsets(Lists.newArrayList(tp)).get(tp);
+                if (end > begin) {
                     endMap.put(tp.topic(), end);
-                    consumer.seek(tp, Math.max(end - 5, 0));
+                    consumer.seek(tp, Math.max(end - 5, begin));
                 }
             }
             while (!endMap.isEmpty()) {
