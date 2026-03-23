@@ -1,0 +1,31 @@
+---
+description: Disallow single-character variable names in code
+alwaysApply: true
+---
+
+# 变量命名：禁止单字符
+
+为保证可读性和可维护性，默认不允许使用单字符变量名。
+
+## 规则
+
+- 禁止使用单字符变量名（例如 `a`、`b`、`x`、`t`、`h`、`q`、`e`）。
+- 允许的例外仅限：
+  - `i`、`j`、`k`：仅用于非常短且语义明确的循环索引。
+  - `_`：用于明确表示“未使用参数/占位符”。
+- 异常对象不要命名为 `e`，统一使用语义化名称，如 `exception`、`ioException`、`interruptedException`。
+- header/topic/partition/record 等中间变量必须使用语义名，如 `offsetHeader`、`topicPartition`、`topicName`。
+
+## 修复示例
+
+```java
+// bad
+catch (Exception e) {
+    log.warn("failed: {}", e.getMessage());
+}
+
+// good
+catch (Exception exception) {
+    log.warn("failed: {}", exception.getMessage());
+}
+```

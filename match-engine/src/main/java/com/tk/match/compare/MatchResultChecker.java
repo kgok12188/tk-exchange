@@ -57,8 +57,8 @@ public class MatchResultChecker {
             for (String symbol : symbols) {
                 try {
                     compareQueuesForSymbol(baseDir, symbol, n, keepSize);
-                } catch (Exception e) {
-                    log.warn("check symbol={} error", symbol, e);
+                } catch (Exception exception) {
+                    log.warn("check symbol={} error", symbol, exception);
                 }
             }
         }
@@ -66,11 +66,11 @@ public class MatchResultChecker {
 
     @PreDestroy
     public void closeAllQueues() {
-        queueCache.forEach((path, q) -> {
+        queueCache.forEach((path, queue) -> {
             try {
-                if (!q.isClosed()) q.close();
-            } catch (Exception e) {
-                log.warn("checker close queue {} failed", path, e);
+                if (!queue.isClosed()) queue.close();
+            } catch (Exception exception) {
+                log.warn("checker close queue {} failed", path, exception);
             }
         });
         queueCache.clear();
@@ -165,8 +165,8 @@ public class MatchResultChecker {
         SingleChronicleQueue queue = queueCache.computeIfAbsent(key, dir -> {
             try {
                 return SingleChronicleQueueBuilder.binary(dir).readOnly(true).build();
-            } catch (Exception e) {
-                log.debug("checker open queue dir={} error: {}", dir, e.getMessage());
+            } catch (Exception exception) {
+                log.debug("checker open queue dir={} error: {}", dir, exception.getMessage());
                 return null;
             }
         });
@@ -208,17 +208,17 @@ public class MatchResultChecker {
                     list.add(new Record(orderReqOffset, payload != null ? payload : ""));
                 }
             }
-        } catch (Exception e) {
-            log.warn("checker read queue dir={} error: {}", queueDir, e.getMessage());
+        } catch (Exception exception) {
+            log.warn("checker read queue dir={} error: {}", queueDir, exception.getMessage());
         }
         return list;
     }
 
     private static Map<Long, String> toMapInRange(List<Record> records, long startExclusive, long endInclusive) {
         Map<Long, String> map = new HashMap<>();
-        for (Record r : records) {
-            if (r.orderReqOffset > startExclusive && r.orderReqOffset <= endInclusive) {
-                map.put(r.orderReqOffset, r.payload);
+        for (Record record : records) {
+            if (record.orderReqOffset > startExclusive && record.orderReqOffset <= endInclusive) {
+                map.put(record.orderReqOffset, record.payload);
             }
         }
         return map;

@@ -45,7 +45,7 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
     private static String hostname() {
         try {
             return InetAddress.getLocalHost().getHostName();
-        } catch (UnknownHostException e) {
+        } catch (UnknownHostException unknownHostException) {
             return "unknown";
         }
     }
@@ -144,8 +144,8 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
             // 启动前先处理已入队的 addSymbol；match_result_* 仅单分区，用 partition 0
             drainPendingEventsSync();
             Set<TopicPartition> initial = new HashSet<>();
-            for (String s : symbols) {
-                initial.add(new TopicPartition(topic(s), 0));
+            for (String symbol : symbols) {
+                initial.add(new TopicPartition(topic(symbol), 0));
             }
             if (!initial.isEmpty()) {
                 consumer.assign(initial);
@@ -163,15 +163,15 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
      * 仅在 startConsumer 内、消费线程启动前调用，处理当前 pending 的 ADD/REMOVE，更新 symbols 与 consumer.assign。
      */
     private void drainPendingEventsSync() {
-        SymbolEvent e;
-        while ((e = pendingEvents.poll()) != null) {
-            if (e.type == EventType.ADD) {
-                if (e.symbol != null && !e.symbol.isEmpty()) {
-                    symbols.add(e.symbol);
+        SymbolEvent event;
+        while ((event = pendingEvents.poll()) != null) {
+            if (event.type == EventType.ADD) {
+                if (event.symbol != null && !event.symbol.isEmpty()) {
+                    symbols.add(event.symbol);
                 }
-            } else if (e.type == EventType.REMOVE) {
-                if (e.symbol != null) {
-                    symbols.remove(e.symbol);
+            } else if (event.type == EventType.REMOVE) {
+                if (event.symbol != null) {
+                    symbols.remove(event.symbol);
                 }
             }
         }
@@ -217,41 +217,41 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
                         }
                     }
                 }
-            } catch (org.apache.kafka.common.errors.WakeupException e) {
+            } catch (org.apache.kafka.common.errors.WakeupException wakeupException) {
                 break;
-            } catch (InterruptedException e) {
+            } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
                 break;
-            } catch (Exception e) {
+            } catch (Exception exception) {
                 if (running.get()) {
-                    log.warn("MatchResultMasterFileQueue consume error", e);
+                    log.warn("MatchResultMasterFileQueue consume error", exception);
                 }
             }
         }
     }
 
     private void drainPendingEvents() throws InterruptedException {
-        SymbolEvent e;
-        while ((e = pendingEvents.poll()) != null) {
-            if (e.type == EventType.ADD) {
-                if (e.symbol != null && !e.symbol.isEmpty()) {
-                    symbols.add(e.symbol);
+        SymbolEvent event;
+        while ((event = pendingEvents.poll()) != null) {
+            if (event.type == EventType.ADD) {
+                if (event.symbol != null && !event.symbol.isEmpty()) {
+                    symbols.add(event.symbol);
                     Set<TopicPartition> set = new HashSet<>(consumer.assignment());
-                    TopicPartition tp = new TopicPartition(topic(e.symbol), 0);
-                    set.add(tp);
+                    TopicPartition topicPartition = new TopicPartition(topic(event.symbol), 0);
+                    set.add(topicPartition);
                     consumer.assign(set);
-                    consumer.seekToEnd(Collections.singletonList(tp));
-                    log.info("MatchResultMasterFileQueue added symbol={} assigned={}", e.symbol, set.size());
+                    consumer.seekToEnd(Collections.singletonList(topicPartition));
+                    log.info("MatchResultMasterFileQueue added symbol={} assigned={}", event.symbol, set.size());
                 }
-            } else if (e.type == EventType.REMOVE) {
-                if (e.symbol != null) {
-                    symbols.remove(e.symbol);
+            } else if (event.type == EventType.REMOVE) {
+                if (event.symbol != null) {
+                    symbols.remove(event.symbol);
                     Set<TopicPartition> set = new HashSet<>(consumer.assignment());
-                    set.remove(new TopicPartition(topic(e.symbol), 0));
+                    set.remove(new TopicPartition(topic(event.symbol), 0));
                     consumer.assign(set);
-                    log.info("MatchResultMasterFileQueue removed symbol={} assigned={}", e.symbol, set.size());
+                    log.info("MatchResultMasterFileQueue removed symbol={} assigned={}", event.symbol, set.size());
                 }
-            } else if (e.type == EventType.CLOSE) {
+            } else if (event.type == EventType.CLOSE) {
                 closeConsumedFileQueues();
                 log.info("MatchResultMasterFileQueue stopped");
                 throw new InterruptedException("MatchResultMasterFileQueue close");
@@ -260,13 +260,13 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
     }
 
     private static String symbolFromRecord(ConsumerRecord<String, String> record) {
-        Header h = record.headers().lastHeader("symbol");
-        if (h != null && h.value() != null) {
-            return new String(h.value(), StandardCharsets.UTF_8);
+        Header symbolHeader = record.headers().lastHeader("symbol");
+        if (symbolHeader != null && symbolHeader.value() != null) {
+            return new String(symbolHeader.value(), StandardCharsets.UTF_8);
         }
-        String t = record.topic();
-        if (t != null && t.startsWith(TOPIC_PREFIX)) {
-            return t.substring(TOPIC_PREFIX.length());
+        String topicName = record.topic();
+        if (topicName != null && topicName.startsWith(TOPIC_PREFIX)) {
+            return topicName.substring(TOPIC_PREFIX.length());
         }
         return null;
     }
@@ -306,8 +306,8 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
                 Objects.requireNonNull(doc.wire()).write().int64(orderReqOffset).write().text(payload);
             }
             lastWriteBySymbol.put(symbol, new LastWrite(orderReqOffset, appender.lastIndexAppended()));
-        } catch (Exception e) {
-            log.error("MatchResultMasterFileQueue write to consumed file queue failed symbol={} orderReqOffset={}", symbol, orderReqOffset, e);
+        } catch (Exception exception) {
+            log.error("MatchResultMasterFileQueue write to consumed file queue failed symbol={} orderReqOffset={}", symbol, orderReqOffset, exception);
         }
     }
 
@@ -319,19 +319,19 @@ public class MatchResultMasterFileQueue implements AutoCloseable {
             Files.createDirectories(dir);
             return SingleChronicleQueueBuilder.binary(dir).epoch(System.currentTimeMillis()).rollCycle(RollCycles.TEN_MINUTELY)
                     .storeFileListener(delayedFileDeletionService::scheduleDeletion).build();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to create consumed file queue for symbol " + symbol, e);
+        } catch (IOException ioException) {
+            throw new RuntimeException("Failed to create consumed file queue for symbol " + symbol, ioException);
         }
     }
 
     private void closeConsumedFileQueues() {
         if (consumedQueuesClosed) return;
         consumedQueuesClosed = true;
-        consumedQueuesBySymbol.values().forEach(q -> {
+        consumedQueuesBySymbol.values().forEach(queue -> {
             try {
-                if (!q.isClosed()) q.close();
-            } catch (Exception e) {
-                log.warn("MatchResultMasterFileQueue close consumed queue error", e);
+                if (!queue.isClosed()) queue.close();
+            } catch (Exception exception) {
+                log.warn("MatchResultMasterFileQueue close consumed queue error", exception);
             }
         });
         consumedQueuesBySymbol.clear();

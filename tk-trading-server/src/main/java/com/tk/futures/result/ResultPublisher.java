@@ -144,9 +144,9 @@ public class ResultPublisher {
                             pr.consumer.accept(null);
                         }
                         break;
-                    } catch (Exception e) {
+                    } catch (Exception exception) {
                         logger.warn("ResultPublisher drain retry error, topicPartition={}, uid={}, err={}",
-                                partition, uid, e.getMessage());
+                                partition, uid, exception.getMessage());
                         try {
                             Thread.sleep(100);
                         } catch (InterruptedException ie) {

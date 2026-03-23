@@ -113,8 +113,8 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
                     }
                     if (isMaster) {
                         // 内存变更成功，统一提交，并通过 consumer 将本次变更的持久化批次交给 ResultPublisher
-                        tradingBook.commit(events -> resultPublisher.publish(slotIndex, uid, offset, events, e -> {
-                            if (e == null) {
+                        tradingBook.commit(events -> resultPublisher.publish(slotIndex, uid, offset, events, publishException -> {
+                            if (publishException == null) {
                                 slotContext.setPushOffset(Math.max(slotContext.getPushOffset(), offset));
                             }
                         }));
@@ -125,9 +125,9 @@ public class SettlementEventHandler implements EventHandler<CommandMessageEvent>
                             slaveFileQueue.append(slotIndex, offset, uid, payloadJson);
                         });
                     }
-                } catch (Exception e) {
+                } catch (Exception exception) {
                     // 任意异常都回滚本次内存变更
-                    log.error("handle command error", e);
+                    log.error("handle command error", exception);
                     tradingBook.rollback();
                     if (command == TradingCommand.MATCH) {
                         tradingBook.addTradingSettle(slotContext.getOffset(), message.data().toJavaObject(TradingSettle.class));

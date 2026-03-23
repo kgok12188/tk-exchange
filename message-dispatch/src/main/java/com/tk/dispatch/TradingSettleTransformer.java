@@ -30,31 +30,31 @@ public final class TradingSettleTransformer {
                     .getFinishOrders().add(fo);
         }
 
-        for (TradeOrder t : response.getTrades()) {
-            if (t.getBuyUid() != null) {
+        for (TradeOrder tradeOrder : response.getTrades()) {
+            if (tradeOrder.getBuyUid() != null) {
                 Ticket buy = Ticket.builder()
-                        .index(t.getIndex())
-                        .orderReqOffset(t.getOrderReqOffset())
-                        .price(t.getPrice())
-                        .volume(t.getVolume() != null ? t.getVolume() : BigDecimal.ZERO)
-                        .uid(t.getBuyUid())
-                        .orderId(t.getBuyOrderId())
-                        .isTaker(Objects.equals(t.getTakerUid(), t.getBuyUid()))
+                        .index(tradeOrder.getIndex())
+                        .orderReqOffset(tradeOrder.getOrderReqOffset())
+                        .price(tradeOrder.getPrice())
+                        .volume(tradeOrder.getVolume() != null ? tradeOrder.getVolume() : BigDecimal.ZERO)
+                        .uid(tradeOrder.getBuyUid())
+                        .orderId(tradeOrder.getBuyOrderId())
+                        .isTaker(Objects.equals(tradeOrder.getTakerUid(), tradeOrder.getBuyUid()))
                         .build();
-                settles.computeIfAbsent(t.getBuyUid(), u -> TradingSettle.builder().uid(u).shardId(t.getBuyShardId()).finishOrders(new ArrayList<>()).tickets(new ArrayList<>()).build())
+                settles.computeIfAbsent(tradeOrder.getBuyUid(), uid -> TradingSettle.builder().uid(uid).shardId(tradeOrder.getBuyShardId()).finishOrders(new ArrayList<>()).tickets(new ArrayList<>()).build())
                         .getTickets().add(buy);
             }
-            if (t.getSellUid() != null) {
+            if (tradeOrder.getSellUid() != null) {
                 Ticket sell = Ticket.builder()
-                        .index(t.getIndex())
-                        .orderReqOffset(t.getOrderReqOffset())
-                        .price(t.getPrice())
-                        .volume(t.getVolume() != null ? t.getVolume() : BigDecimal.ZERO)
-                        .uid(t.getSellUid())
-                        .orderId(t.getSellOrderId())
-                        .isTaker(Objects.equals(t.getTakerUid(), t.getSellUid()))
+                        .index(tradeOrder.getIndex())
+                        .orderReqOffset(tradeOrder.getOrderReqOffset())
+                        .price(tradeOrder.getPrice())
+                        .volume(tradeOrder.getVolume() != null ? tradeOrder.getVolume() : BigDecimal.ZERO)
+                        .uid(tradeOrder.getSellUid())
+                        .orderId(tradeOrder.getSellOrderId())
+                        .isTaker(Objects.equals(tradeOrder.getTakerUid(), tradeOrder.getSellUid()))
                         .build();
-                settles.computeIfAbsent(t.getSellUid(), u -> TradingSettle.builder().uid(u).shardId(t.getSellShardId()).finishOrders(new ArrayList<>()).tickets(new ArrayList<>()).build())
+                settles.computeIfAbsent(tradeOrder.getSellUid(), uid -> TradingSettle.builder().uid(uid).shardId(tradeOrder.getSellShardId()).finishOrders(new ArrayList<>()).tickets(new ArrayList<>()).build())
                         .getTickets().add(sell);
             }
         }

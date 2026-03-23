@@ -1,11 +1,5 @@
-# 构建上下文为项目根目录 (context: ..)
-# 多阶段：先 Maven 打包，再运行
-#
-# 基础镜像：Amazon Corretto 17（Alpine）。其它常见 JDK17 来源示例：
-#   - eclipse-temurin:17-jdk-alpine / 17-jre-alpine
-#   - bellsoft/liberica-openjdk-alpine:17 或 bellsoft/liberica-openjre-alpine:17
-#   - azul/zulu-openjdk-alpine:17
-FROM amazoncorretto:17-alpine AS builder
+
+FROM amazoncorretto:21-alpine AS builder
 WORKDIR /build
 
 RUN apk add --no-cache maven
@@ -14,8 +8,8 @@ COPY . .
 RUN mvn -B -pl match-engine -am package -DskipTests -q && \
     mv match-engine/target/match-engine.jar /build/match-engine.jar
 
-# 运行阶段：同为 Corretto 17 Alpine（仅运行 jar；若需更小镜像可换 jre-only 类标签）
-FROM amazoncorretto:17-alpine AS runtime
+
+FROM amazoncorretto:21-alpine AS runtime
 WORKDIR /app
 COPY --from=builder /build/match-engine.jar app.jar
 

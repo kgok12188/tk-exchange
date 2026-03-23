@@ -48,10 +48,10 @@ public class DelayedFileDeletionService implements AutoCloseable {
                 try {
                     Files.deleteIfExists(item.path);
                     log.debug("DelayedFileDeletionService deleted path={}", item.path);
-                } catch (Exception e) {
-                    log.warn("DelayedFileDeletionService delete failed path={}", item.path, e);
+                } catch (Exception exception) {
+                    log.warn("DelayedFileDeletionService delete failed path={}", item.path, exception);
                 }
-            } catch (InterruptedException e) {
+            } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
                 break;
             }
@@ -66,7 +66,7 @@ public class DelayedFileDeletionService implements AutoCloseable {
         consumerThread.interrupt();
         try {
             consumerThread.join(TimeUnit.SECONDS.toMillis(5));
-        } catch (InterruptedException e) {
+        } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
         }
     }
@@ -87,8 +87,8 @@ public class DelayedFileDeletionService implements AutoCloseable {
         }
 
         @Override
-        public int compareTo(java.util.concurrent.Delayed o) {
-            if (!(o instanceof DelayedPath other)) return 1;
+        public int compareTo(java.util.concurrent.Delayed delayedValue) {
+            if (!(delayedValue instanceof DelayedPath other)) return 1;
             return Long.compare(this.deleteAtMs, other.deleteAtMs);
         }
     }

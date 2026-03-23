@@ -73,9 +73,9 @@ public class TradingResultSlaveFileQueue {
                     writeRecord(appender, offset, uid, payloadJson);
                 }
                 return;
-            } catch (Exception e) {
+            } catch (Exception exception) {
                 logger.warn("SlaveChronicleQueue append retry failed, slotIndex={}, offset={}, uid={}, msg={}",
-                        slotIndex, offset, uid, e.getMessage());
+                        slotIndex, offset, uid, exception.getMessage());
                 // “直到写入成功”为目标：无限重试，可按需加退避
             }
         }
@@ -115,8 +115,8 @@ public class TradingResultSlaveFileQueue {
                         }
                     }
                 }
-            } catch (Exception e) {
-                logger.error("SlaveChronicleQueue replay failed, dir={}", dir, e);
+            } catch (Exception exception) {
+                logger.error("SlaveChronicleQueue replay failed, dir={}", dir, exception);
                 return; // replay 失败：不清空队列，避免丢数据
             }
 
@@ -132,8 +132,8 @@ public class TradingResultSlaveFileQueue {
                     .epoch(System.currentTimeMillis())
                     .rollCycle(RollCycles.TEN_MINUTELY)
                     .build();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to create chronicle queue for slotIndex=" + slotIndex, e);
+        } catch (IOException ioException) {
+            throw new RuntimeException("Failed to create chronicle queue for slotIndex=" + slotIndex, ioException);
         }
     }
 
@@ -156,8 +156,8 @@ public class TradingResultSlaveFileQueue {
                 if (!queue.isClosed()) {
                     queue.close();
                 }
-            } catch (Exception e) {
-                logger.warn("SlaveChronicleQueue close queue failed, slotIndex={}", slotIndex, e);
+            } catch (Exception exception) {
+                logger.warn("SlaveChronicleQueue close queue failed, slotIndex={}", slotIndex, exception);
             }
         }
 
@@ -173,14 +173,14 @@ public class TradingResultSlaveFileQueue {
                 }
 
                 @Override
-                public FileVisitResult postVisitDirectory(Path d, IOException exc) throws IOException {
-                    if (exc != null) throw exc;
-                    Files.delete(d);
+                public FileVisitResult postVisitDirectory(Path directoryPath, IOException ioException) throws IOException {
+                    if (ioException != null) throw ioException;
+                    Files.delete(directoryPath);
                     return FileVisitResult.CONTINUE;
                 }
             });
-        } catch (IOException e) {
-            logger.warn("SlaveChronicleQueue delete queue dir failed, dir={}", dir, e);
+        } catch (IOException ioException) {
+            logger.warn("SlaveChronicleQueue delete queue dir failed, dir={}", dir, ioException);
         }
     }
 

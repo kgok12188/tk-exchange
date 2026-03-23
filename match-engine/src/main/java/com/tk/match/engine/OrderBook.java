@@ -7,6 +7,8 @@ import com.tk.protocol.dto.FinishOrder;
 import com.tk.protocol.dto.FinishStatus;
 import com.tk.protocol.dto.MarketConfig;
 import com.tk.protocol.dto.OrderPayload;
+import com.tk.protocol.dto.RejectReason;
+import com.tk.protocol.dto.TimeInForce;
 import exchange.core2.collections.art.LongAdaptiveRadixTreeMap;
 import exchange.core2.collections.art.LongObjConsumer;
 import lombok.Getter;
@@ -64,6 +66,8 @@ public final class OrderBook {
     private transient int orderCount = 0;
 
     private final OrderMatcher LIMIT_MATCHER = new LimitOrderMatcher(this);
+    private final OrderMatcher LIMIT_IOC_MATCHER = new LimitIocOrderMatcher(this);
+    private final OrderMatcher LIMIT_FOK_MATCHER = new LimitFokOrderMatcher(this);
     private final OrderMatcher MARKET_MATCHER = new MarketOrderMatcher(this);
     private final OrderMatcher LIMIT_MAKER_MATCHER = new LimitMakerOrderMatcher(this);
 
@@ -243,23 +247,30 @@ public final class OrderBook {
 
         BookOrder takerOrder = new BookOrder(payload, orderReqOffset, marketConfig);
 
-        if (takerOrder.getOrderId() <= 0 || ordersById.get(takerOrder.getOrderId()) != null) {
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount())));
+        if (payload.getCreateTime() + marketConfig.getMaxValidTime() < System.currentTimeMillis()) {
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.ORDER_EXPIRED)));
         }
+
+        if (takerOrder.getOrderId() <= 0 || ordersById.get(takerOrder.getOrderId()) != null) {
+            RejectReason rejectReason = takerOrder.getOrderId() <= 0 ? RejectReason.INVALID_ORDER_ID : RejectReason.DUPLICATE_ORDER_ID;
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), rejectReason)));
+        }
+
         if (!navigableMapWrappers.isEmpty()) {
             for (Roaring64NavigableMapWrapper navigableMapWrapper : navigableMapWrappers) {
                 if (navigableMapWrapper.getRoaring64NavigableMap().contains(takerOrder.getOrderId())) {
-                    return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount())));
+                    return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.DUPLICATE_ORDER_ID)));
                 }
             }
             Roaring64NavigableMapWrapper last = navigableMapWrappers.getLast();
-            if (timestamp / windowInterval == last.getTimestamp()) {
+            long timeIndex = timestamp / windowInterval;
+            if (timeIndex == last.getTimestamp()) {
                 last.getRoaring64NavigableMap().add(takerOrder.getOrderId());
             } else {
                 if (navigableMapWrappers.size() >= windowSize) {
                     navigableMapWrappers.removeFirst();
                 }
-                Roaring64NavigableMapWrapper wrapper = new Roaring64NavigableMapWrapper(new Roaring64NavigableMap(), timestamp / windowInterval);
+                Roaring64NavigableMapWrapper wrapper = new Roaring64NavigableMapWrapper(new Roaring64NavigableMap(), timeIndex);
                 wrapper.getRoaring64NavigableMap().add(takerOrder.getOrderId());
                 navigableMapWrappers.add(wrapper);
             }
@@ -269,9 +280,16 @@ public final class OrderBook {
             navigableMapWrappers.add(wrapper);
         }
 
-        OrderMatcher matcher = selectMatcher(payload.getPriceType());
+        TimeInForce timeInForce = TimeInForce.fromWire(payload.getTimeInForce());
+        if (isLimitOrder(payload.getPriceType()) && payload.getTimeInForce() != null && timeInForce == null) {
+            return MatchResult.of(Collections.emptyList(), List.of(
+                    finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_TIME_IN_FORCE)
+            ));
+        }
+
+        OrderMatcher matcher = selectMatcher(payload.getPriceType(), timeInForce);
         if (matcher == null) {
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount())));
+            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_PRICE_TYPE)));
         }
         MatchResult invalid = matcher.validate(takerOrder);
         if (invalid != null) {
@@ -280,13 +298,29 @@ public final class OrderBook {
         return matcher.match(takerOrder, orderReqOffset);
     }
 
-    private OrderMatcher selectMatcher(String priceType) {
+    private OrderMatcher selectMatcher(String priceType, TimeInForce timeInForce) {
         if (priceType == null) return null;
         return switch (priceType.toUpperCase()) {
             case "MARKET" -> MARKET_MATCHER;
             case "LIMIT_MAKER", "POST_ONLY" -> LIMIT_MAKER_MATCHER;
+            case "LIMIT" -> selectLimitMatcher(timeInForce);
             default -> LIMIT_MATCHER;
         };
+    }
+
+    private OrderMatcher selectLimitMatcher(TimeInForce timeInForce) {
+        if (timeInForce == null || timeInForce == TimeInForce.GTC) {
+            return LIMIT_MATCHER;
+        }
+        return switch (timeInForce) {
+            case IOC -> LIMIT_IOC_MATCHER;
+            case FOK -> LIMIT_FOK_MATCHER;
+            default -> LIMIT_MATCHER;
+        };
+    }
+
+    private boolean isLimitOrder(String priceType) {
+        return priceType != null && "LIMIT".equalsIgnoreCase(priceType);
     }
 
     public MatchResult cancelOrder(Long orderId) {

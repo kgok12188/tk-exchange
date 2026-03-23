@@ -39,8 +39,8 @@ public class ResponsePublisher {
             if (logger.isDebugEnabled()) {
                 logger.debug("published response to topic={}, reqId={}", KafkaTopic.RESPONSE, reqId);
             }
-        } catch (Exception e) {
-            logger.error("failed to publish response, reqId={}, payload={}", reqId, payload, e);
+        } catch (Exception exception) {
+            logger.error("failed to publish response, reqId={}, payload={}", reqId, payload, exception);
         }
     }
 }

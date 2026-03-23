@@ -91,17 +91,17 @@ public class MatchManager {
         log.info("MatchManager started slots={} symbols={}", ringBufferNumbers, symbols);
     }
 
-    private MatchSlot getMatchSlot(int i) {
+    private MatchSlot getMatchSlot(int slotIndex) {
         List<String> mySymbols = new ArrayList<>();
         for (String symbol : symbols) {
-            if (slotIndex(symbol) == i) {
+            if (slotIndex(symbol) == slotIndex) {
                 mySymbols.add(symbol);
             }
         }
         Path snapshotPath = snapshotDir != null ? Path.of(snapshotDir) : null;
         Path fileQueuePath = fileQueueDir != null ? Path.of(fileQueueDir) : null;
         return new MatchSlot(
-                i,
+                slotIndex,
                 producer,
                 mySymbols,
                 bootstrapServers,
@@ -145,9 +145,9 @@ public class MatchManager {
      */
     public LastWrite getSlaveLastWrite(String symbol) {
         if (symbol == null || symbol.isEmpty() || slots == null) return null;
-        int k = slotIndex(symbol);
-        if (k < 0 || k >= slots.size()) return null;
-        return slots.get(k).getLastWrite(symbol);
+        int symbolSlotIndex = slotIndex(symbol);
+        if (symbolSlotIndex < 0 || symbolSlotIndex >= slots.size()) return null;
+        return slots.get(symbolSlotIndex).getLastWrite(symbol);
     }
 
     /**
@@ -163,8 +163,15 @@ public class MatchManager {
      */
     public void submitTakeSnapshot(String symbol) {
         if (symbol == null || symbol.isEmpty() || slots == null) return;
-        int k = slotIndex(symbol);
-        slots.get(k).submitTakeSnapshot(symbol);
+        int symbolSlotIndex = slotIndex(symbol);
+        slots.get(symbolSlotIndex).submitTakeSnapshot(symbol);
+    }
+
+    /**
+     * 提交快照请求（与 OpenSpec 术语保持一致）：向对应 slot 下发打快照请求；快照请求与 order_req 同队，由 worker 按序执行。
+     */
+    public void submitSnapshotRequest(String symbol) {
+        submitTakeSnapshot(symbol);
     }
 
     /**
@@ -173,9 +180,9 @@ public class MatchManager {
      */
     public void updateComparedProgressFromConsistencyCheck(String symbol, long comparedOrderReqOffset, long slaveQueueStartIndex) {
         if (symbol == null || symbol.isEmpty() || slots == null) return;
-        int k = slotIndex(symbol);
-        if (k < 0 || k >= slots.size()) return;
-        slots.get(k).updateComparedOffset(symbol, comparedOrderReqOffset, slaveQueueStartIndex);
+        int symbolSlotIndex = slotIndex(symbol);
+        if (symbolSlotIndex < 0 || symbolSlotIndex >= slots.size()) return;
+        slots.get(symbolSlotIndex).updateComparedOffset(symbol, comparedOrderReqOffset, slaveQueueStartIndex);
     }
 
     /**
@@ -223,13 +230,13 @@ public class MatchManager {
         if (!symbolsAdded.add(symbol)) {
             return false;
         }
-        int k = slotIndex(symbol);
+        int symbolSlotIndex = slotIndex(symbol);
         long initialMasterOffset = matchResultTailQueryService.queryLastOrderReqOffset(symbol);
-        slots.get(k).addSymbol(symbol, initialMasterOffset);
+        slots.get(symbolSlotIndex).addSymbol(symbol, initialMasterOffset);
         if (matchResultMasterFileQueue != null) {
             matchResultMasterFileQueue.addSymbol(symbol);
         }
-        log.info("MatchManager addSymbol symbol={} topic={} slot={} initialMasterOffset={}", symbol, ORDER_REQ_PREFIX + symbol, k, initialMasterOffset);
+        log.info("MatchManager addSymbol symbol={} topic={} slot={} initialMasterOffset={}", symbol, ORDER_REQ_PREFIX + symbol, symbolSlotIndex, initialMasterOffset);
         return true;
     }
 
@@ -247,8 +254,8 @@ public class MatchManager {
 
     private int slotIndex(String symbol) {
         if (symbol == null) return 0;
-        int h = symbol.hashCode();
-        return (h & 0x720F_F01F) % ringBufferNumbers;
+        int hashCode = symbol.hashCode();
+        return (hashCode & 0x720F_F01F) % ringBufferNumbers;
     }
 
     private KafkaProducer<String, String> createProducer() {
@@ -280,8 +287,8 @@ public class MatchManager {
         try {
             deleteDirectoryRecursively(master);
             log.info("MatchResultMasterFileQueue startup cleared master file queue dir: {}", master.toAbsolutePath());
-        } catch (IOException e) {
-            log.warn("MatchResultMasterFileQueue failed to clear master file queue dir: {}", master.toAbsolutePath(), e);
+        } catch (IOException ioException) {
+            log.warn("MatchResultMasterFileQueue failed to clear master file queue dir: {}", master.toAbsolutePath(), ioException);
         }
     }
 

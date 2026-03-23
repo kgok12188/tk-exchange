@@ -85,9 +85,9 @@ public class TradingLeaderElectionService {
             leaderLatch.start();
             running.set(true);
             log.info("trading-server leader election started, zookeeper={}, path={}", zookeeperServers, leaderLatchPath);
-        } catch (Exception e) {
-            log.error("trading-server leader election start failed", e);
-            throw new RuntimeException("Leader election start failed", e);
+        } catch (Exception exception) {
+            log.error("trading-server leader election start failed", exception);
+            throw new RuntimeException("Leader election start failed", exception);
         }
     }
 
@@ -98,15 +98,15 @@ public class TradingLeaderElectionService {
             if (leaderLatch != null) {
                 leaderLatch.close();
             }
-        } catch (Exception e) {
-            log.warn("LeaderLatch close error", e);
+        } catch (Exception exception) {
+            log.warn("LeaderLatch close error", exception);
         }
         try {
             if (client != null) {
                 client.close();
             }
-        } catch (Exception e) {
-            log.warn("CuratorFramework close error", e);
+        } catch (Exception exception) {
+            log.warn("CuratorFramework close error", exception);
         }
         slotManager.broadcastRole(false);
         log.info("trading-server leader election stopped");
@@ -121,7 +121,7 @@ public class TradingLeaderElectionService {
             }
             try {
                 Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
                 return;
             }

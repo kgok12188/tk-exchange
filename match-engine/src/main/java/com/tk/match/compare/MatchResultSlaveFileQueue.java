@@ -54,8 +54,8 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
             writeRecord(appender, orderReqOffset, payload);
             long lastIndex = appender.lastIndexAppended();
             lastWriteBySymbol.put(symbol, new LastWrite(orderReqOffset, lastIndex));
-        } catch (Exception e) {
-            log.error("MatchResultFileQueue write failed symbol={} orderReqOffset={}", symbol, orderReqOffset, e);
+        } catch (Exception exception) {
+            log.error("MatchResultFileQueue write failed symbol={} orderReqOffset={}", symbol, orderReqOffset, exception);
         }
     }
 
@@ -72,8 +72,8 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
             Files.createDirectories(dir);
             return SingleChronicleQueueBuilder.binary(dir).epoch(System.currentTimeMillis()).rollCycle(RollCycles.TEN_MINUTELY)
                     .storeFileListener(delayedFileDeletionService::scheduleDeletion).build();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to create file queue for symbol " + symbol, e);
+        } catch (IOException ioException) {
+            throw new RuntimeException("Failed to create file queue for symbol " + symbol, ioException);
         }
     }
 
@@ -89,10 +89,10 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
      */
     public void replay(String symbol, long minOrderReqOffsetExclusive, long startIndexHint, BiConsumer<String, Long> consumer) {
         if (symbol == null || consumer == null || closed) return;
-        SingleChronicleQueue q = queuesBySymbol.get(symbol);
-        if (q == null) return;
+        SingleChronicleQueue queue = queuesBySymbol.get(symbol);
+        if (queue == null) return;
         try {
-            ExcerptTailer tail = q.createTailer();
+            ExcerptTailer tail = queue.createTailer();
             if (startIndexHint >= 0) {
                 if (!tail.moveToIndex(startIndexHint)) {
                     log.warn("MatchResultSlaveFileQueue replay moveToIndex({}) failed symbol={} fallback toStart", startIndexHint, symbol);
@@ -111,8 +111,8 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
                     }
                 }
             }
-        } catch (Exception e) {
-            log.error("MatchResultFileQueue replay failed symbol={}", symbol, e);
+        } catch (Exception exception) {
+            log.error("MatchResultFileQueue replay failed symbol={}", symbol, exception);
         }
     }
 
@@ -120,11 +120,11 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
     public void close() {
         if (closed) return;
         closed = true;
-        queuesBySymbol.values().forEach(q -> {
+        queuesBySymbol.values().forEach(queue -> {
             try {
-                if (!q.isClosed()) q.close();
-            } catch (Exception e) {
-                log.warn("Error closing Chronicle queue", e);
+                if (!queue.isClosed()) queue.close();
+            } catch (Exception exception) {
+                log.warn("Error closing Chronicle queue", exception);
             }
         });
         queuesBySymbol.clear();
@@ -136,13 +136,13 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
      */
     public void clear(String symbol) {
         if (symbol == null) return;
-        SingleChronicleQueue q = queuesBySymbol.remove(symbol);
+        SingleChronicleQueue queue = queuesBySymbol.remove(symbol);
         lastWriteBySymbol.remove(symbol);
-        if (q == null) return;
+        if (queue == null) return;
         try {
-            if (!q.isClosed()) q.close();
-        } catch (Exception e) {
-            log.warn("MatchResultSlaveFileQueue close queue symbol={}", symbol, e);
+            if (!queue.isClosed()) queue.close();
+        } catch (Exception exception) {
+            log.warn("MatchResultSlaveFileQueue close queue symbol={}", symbol, exception);
         }
         Path dir = baseDir.resolve("slave").resolve(symbol);
         try {
@@ -155,15 +155,15 @@ public class MatchResultSlaveFileQueue implements AutoCloseable {
                     }
 
                     @Override
-                    public FileVisitResult postVisitDirectory(Path d, IOException exc) throws IOException {
-                        if (exc != null) throw exc;
-                        Files.delete(d);
+                    public FileVisitResult postVisitDirectory(Path directoryPath, IOException ioException) throws IOException {
+                        if (ioException != null) throw ioException;
+                        Files.delete(directoryPath);
                         return FileVisitResult.CONTINUE;
                     }
                 });
             }
-        } catch (IOException e) {
-            log.warn("MatchResultSlaveFileQueue delete queue dir symbol={} path={}", symbol, dir, e);
+        } catch (IOException ioException) {
+            log.warn("MatchResultSlaveFileQueue delete queue dir symbol={} path={}", symbol, dir, ioException);
         }
     }
 

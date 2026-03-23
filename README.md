@@ -8,7 +8,7 @@
 
 运行环境与基础框架：
 
-- **JDK 版本**：17（`maven.compiler.source` / `target` = 17）。
+- **JDK 版本**：21（`maven.compiler.source` / `target` = 21）。
 - **Spring Boot 版本**：3.5.11（父 POM 继承自 `spring-boot-starter-parent:3.5.11`）。
 
 系统负责：用户下单、交易逻辑处理、风控校验与数据持久化。通过 **消息队列（MQ）** 做异步与定序，通过 **分区（Sharding）** 做水平扩展，通过 **主从** 保证高可用与数据一致。

@@ -47,25 +47,25 @@ public class SnapshotScheduler {
                     return;
                 }
             }
-            int n = matchManager.getSlotCount();
-            if (n == 0) return;
+            int slotCount = matchManager.getSlotCount();
+            if (slotCount == 0) return;
             int total = 0;
-            for (int i = 0; i < n; i++) {
-                total += matchManager.getSymbolsBySlotIndex(i).size();
+            for (int slotIndex = 0; slotIndex < slotCount; slotIndex++) {
+                total += matchManager.getSymbolsBySlotIndex(slotIndex).size();
             }
             long interval = Math.min(matchSnapshotIntervalMs / total, 2000);
-            for (int i = 0; i < n; i++) {
-                for (String symbol : matchManager.getSymbolsBySlotIndex(i)) {
-                    matchManager.submitTakeSnapshot(symbol);
+            for (int slotIndex = 0; slotIndex < slotCount; slotIndex++) {
+                for (String symbol : matchManager.getSymbolsBySlotIndex(slotIndex)) {
+                    matchManager.submitSnapshotRequest(symbol);
                     try {
                         Thread.sleep(interval);
-                    } catch (InterruptedException e) {
+                    } catch (InterruptedException interruptedException) {
                         // ignore
                     }
                 }
             }
             if (total > 0 && log.isDebugEnabled()) {
-                log.debug("Snapshot schedule submitted {} snapshot request(s) across {} slot(s)", total, n);
+                log.debug("Snapshot schedule submitted {} snapshot request(s) across {} slot(s)", total, slotCount);
             }
         }
     }

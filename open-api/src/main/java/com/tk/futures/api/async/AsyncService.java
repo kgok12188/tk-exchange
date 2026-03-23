@@ -110,16 +110,16 @@ public class AsyncService implements SmartLifecycle {
                                     try {
                                         AsyncResult asyncResult = JSON.parseObject(record.value(), AsyncResult.class);
                                         deferredResult.setResult(asyncResult);
-                                    } catch (Exception e) {
-                                        logger.error("consumer response error:{}", record.value(), e);
+                                    } catch (Exception exception) {
+                                        logger.error("consumer response error:{}", record.value(), exception);
                                     }
                                 }
                             }
                         });
                     }
                 }
-            } catch (Exception e) {
-                logger.warn("consumer_error", e);
+            } catch (Exception exception) {
+                logger.warn("consumer_error", exception);
             }
             logger.info("close_consumer");
         }

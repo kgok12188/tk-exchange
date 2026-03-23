@@ -47,23 +47,23 @@ public class TradingResultTailQueryService {
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 
-        TopicPartition tp = new TopicPartition(topic, partition);
+        TopicPartition topicPartition = new TopicPartition(topic, partition);
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            consumer.assign(Collections.singletonList(tp));
-            consumer.seekToEnd(Collections.singletonList(tp));
-            long end = consumer.position(tp); // next offset
+            consumer.assign(Collections.singletonList(topicPartition));
+            consumer.seekToEnd(Collections.singletonList(topicPartition));
+            long end = consumer.position(topicPartition); // next offset
             if (end <= 0) return -1L;
-            consumer.seek(tp, Math.max(end - 10, 0));
+            consumer.seek(topicPartition, Math.max(end - 10, 0));
             var records = consumer.poll(java.time.Duration.ofMillis(100));
             long offset = -1;
             for (var record : records) {
-                Header h = record.headers().lastHeader("offset");
-                if (h != null && h.value() != null) {
+                Header offsetHeader = record.headers().lastHeader("offset");
+                if (offsetHeader != null && offsetHeader.value() != null) {
                     try {
-                        long v = Long.parseLong(new String(h.value(), StandardCharsets.UTF_8));
-                        offset = Math.max(offset, v);
-                    } catch (Exception e) {
-                        log.warn("0_queryLastOffset failed, topic={}, partition={}, err={}", topic, partition, e.getMessage());
+                        long parsedOffset = Long.parseLong(new String(offsetHeader.value(), StandardCharsets.UTF_8));
+                        offset = Math.max(offset, parsedOffset);
+                    } catch (Exception exception) {
+                        log.warn("0_queryLastOffset failed, topic={}, partition={}, err={}", topic, partition, exception.getMessage());
                     }
                 }
             }

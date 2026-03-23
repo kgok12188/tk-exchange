@@ -86,7 +86,7 @@ public class DataSynchronizationService implements SmartLifecycle {
                     if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
                         executor.shutdownNow();
                     }
-                } catch (InterruptedException e) {
+                } catch (InterruptedException interruptedException) {
                     Thread.currentThread().interrupt();
                     executor.shutdownNow();
                 }
@@ -132,8 +132,8 @@ public class DataSynchronizationService implements SmartLifecycle {
                 ConsumerRecords<String, String> records;
                 try {
                     records = consumer.poll(Duration.ofMillis(200));
-                } catch (Exception e) {
-                    logger.warn("poll error", e);
+                } catch (Exception exception) {
+                    logger.warn("poll error", exception);
                     sleepRetry(consecutiveFailures);
                     continue;
                 }
@@ -151,9 +151,9 @@ public class DataSynchronizationService implements SmartLifecycle {
                     try {
                         processRecord(record);
                         consecutiveFailures = 0;
-                    } catch (Exception e) {
+                    } catch (Exception exception) {
                         logger.error("processRecord failed, topic={}, partition={}, offset={}, value={}",
-                                record.topic(), record.partition(), record.offset(), record.value(), e);
+                                record.topic(), record.partition(), record.offset(), record.value(), exception);
                         batchSuccess = false;
                         consumer.seek(new TopicPartition(record.topic(), record.partition()), record.offset());
                         sleepRetry(++consecutiveFailures);
@@ -166,10 +166,10 @@ public class DataSynchronizationService implements SmartLifecycle {
                         consumer.commitSync();
                     } catch (Exception ee) {
                         logger.warn("commitSync failed", ee);
-                        for (Map.Entry<String, Map<Integer, Long>> e : topicOffsetPartitions.entrySet()) {
-                            for (Map.Entry<Integer, Long> pe : e.getValue().entrySet()) {
-                                if (pe.getValue() != null) {
-                                    consumer.seek(new TopicPartition(e.getKey(), pe.getKey()), pe.getValue());
+                        for (Map.Entry<String, Map<Integer, Long>> topicOffsetEntry : topicOffsetPartitions.entrySet()) {
+                            for (Map.Entry<Integer, Long> partitionOffsetEntry : topicOffsetEntry.getValue().entrySet()) {
+                                if (partitionOffsetEntry.getValue() != null) {
+                                    consumer.seek(new TopicPartition(topicOffsetEntry.getKey(), partitionOffsetEntry.getKey()), partitionOffsetEntry.getValue());
                                 }
                             }
                         }

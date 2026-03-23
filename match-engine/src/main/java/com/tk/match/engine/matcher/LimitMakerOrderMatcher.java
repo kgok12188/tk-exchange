@@ -5,6 +5,7 @@ import com.tk.match.engine.MatchResult;
 import com.tk.match.engine.OrderBook;
 import com.tk.protocol.dto.FinishOrder;
 import com.tk.protocol.dto.FinishStatus;
+import com.tk.protocol.dto.RejectReason;
 
 import java.math.BigDecimal;
 import java.util.Collections;
@@ -24,7 +25,7 @@ public class LimitMakerOrderMatcher extends LimitOrderMatcher {
         if (wouldCross(orderBook, takerOrder)) {
             // taker 尚未 addToBook，无需从簿中移除
             BigDecimal leaveVolume = takerOrder.getRemainingVolume() != null ? takerOrder.getRemainingVolume() : BigDecimal.ZERO;
-            FinishOrder fo = MatchSupport.finishOrder(takerOrder, FinishStatus.POST_ONLY_REJECT, leaveVolume);
+            FinishOrder fo = MatchSupport.finishOrder(takerOrder, FinishStatus.POST_ONLY_REJECT, leaveVolume, RejectReason.POST_ONLY_WOULD_CROSS);
             return MatchResult.of(Collections.emptyList(), List.of(fo));
         }
         orderBook.addToBook(takerOrder);

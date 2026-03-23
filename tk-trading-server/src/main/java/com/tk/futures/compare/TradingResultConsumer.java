@@ -66,7 +66,7 @@ public class TradingResultConsumer {
             consumerThread.interrupt();
             try {
                 consumerThread.join(3000);
-            } catch (InterruptedException e) {
+            } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
             }
         }

@@ -61,8 +61,8 @@ public final class SnapshotFileHelper {
                 try {
                     w.write(MAPPER.writeValueAsString(o));
                     w.newLine();
-                } catch (IOException e) {
-                    writeErr[0] = e;
+                } catch (IOException ioException) {
+                    writeErr[0] = ioException;
                 }
             });
             if (writeErr[0] != null) {
@@ -139,8 +139,8 @@ public final class SnapshotFileHelper {
             }
             log.warn("Snapshot load failed for all {} candidate(s) symbol={} dir={}", candidates.size(), symbol, snapshotDir);
             return null;
-        } catch (Exception e) {
-            log.warn("Snapshot load failed symbol={} dir={}", symbol, snapshotDir, e);
+        } catch (Exception exception) {
+            log.warn("Snapshot load failed symbol={} dir={}", symbol, snapshotDir, exception);
             return null;
         }
     }
@@ -190,8 +190,8 @@ public final class SnapshotFileHelper {
             orderList.sort(Comparator.comparingLong(BookOrder::getSeq));
             long cfgVer = meta.getMarketConfigVersion() != null ? meta.getMarketConfigVersion() : -1L;
             return new SnapshotLoadResult(meta.getOffset(), orderList, meta, cfgVer);
-        } catch (Exception e) {
-            log.debug("Snapshot loadOne failed path={}", file, e);
+        } catch (Exception exception) {
+            log.debug("Snapshot loadOne failed path={}", file, exception);
             return null;
         }
     }
@@ -226,7 +226,7 @@ public final class SnapshotFileHelper {
     private static long parseOffsetFromFileName(String fileName, String prefix) {
         try {
             return Long.parseLong(fileName.substring(prefix.length()));
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException numberFormatException) {
             return 0L;
         }
     }

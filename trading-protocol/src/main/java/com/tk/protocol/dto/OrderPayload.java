@@ -37,11 +37,22 @@ public class OrderPayload {
     private int shardId;
     private String symbol;
     private Long marketId;
-    /** BUY / SELL */
+    /**
+     * BUY / SELL
+     */
     private String side;
-    /** LIMIT, MARKET, LIMIT_MAKER (post-only) */
+    /**
+     * LIMIT, MARKET, LIMIT_MAKER (post-only)
+     */
     private String priceType;
-    /** 限价必填；市价可为 null */
+    /**
+     * LIMIT 单的时效策略：GTC / IOC / FOK（可选，默认 GTC）。
+     * 兼容旧值：1=GTC, 2=IOC, 3=FOK。
+     */
+    private String timeInForce;
+    /**
+     * 限价必填；市价可为 null
+     */
     private BigDecimal price;
     /**
      * <b>base</b> 数量（如 BTC）。限价必填其一或配合 amount；<b>市价卖单必传</b>；市价买单可选为「最多成交 base」。
@@ -51,4 +62,5 @@ public class OrderPayload {
      * <b>quote</b> 名义（如 USDT）。限价可与 {@link #price} 折算 base；<b>市价买单必传</b>（最多成交金额）；市价卖单可选为「累计成交额上限」。
      */
     private BigDecimal amount;
+    private long createTime;
 }

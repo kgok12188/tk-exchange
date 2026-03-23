@@ -248,14 +248,14 @@ public class MatchSlot {
                 joinTarget.interrupt();
                 try {
                     joinTarget.join(30_000);
-                } catch (InterruptedException e) {
+                } catch (InterruptedException interruptedException) {
                     Thread.currentThread().interrupt();
                 }
                 if (joinTarget.isAlive()) {
                     log.warn("MatchSlot order-consumer did not exit within 30s, index={}", index);
                     try {
                         joinTarget.join(10_000);
-                    } catch (InterruptedException e) {
+                    } catch (InterruptedException interruptedException) {
                         Thread.currentThread().interrupt();
                     }
                 }
@@ -264,8 +264,8 @@ public class MatchSlot {
             if (consumer != null) {
                 try {
                     consumer.close();
-                } catch (Exception e) {
-                    log.warn("MatchSlot consumer close error index={}", index, e);
+                } catch (Exception exception) {
+                    log.warn("MatchSlot consumer close error index={}", index, exception);
                 }
                 consumer = null;
             }
@@ -291,9 +291,9 @@ public class MatchSlot {
         }
         try {
             startLatch.await();
-        } catch (InterruptedException e) {
+        } catch (InterruptedException interruptedException) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("MatchSlot start interrupted", e);
+            throw new RuntimeException("MatchSlot start interrupted", interruptedException);
         }
         log.info("MatchSlot started index={} symbols={} engines={} disruptor=BlockingWaitStrategy", index, symbols.size(), enginesBySymbol.size());
 
@@ -317,14 +317,14 @@ public class MatchSlot {
                         ringBuffer.publish(seq);
                     }
                 }
-            } catch (org.apache.kafka.common.errors.WakeupException e) {
+            } catch (org.apache.kafka.common.errors.WakeupException wakeupException) {
                 break;
-            } catch (InterruptedException e) {
+            } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
                 break;
-            } catch (Exception e) {
+            } catch (Exception exception) {
                 if (running.get()) {
-                    log.warn("MatchSlot consumer error slotIndex={}", index, e);
+                    log.warn("MatchSlot consumer error slotIndex={}", index, exception);
                 }
             }
         }
@@ -350,10 +350,10 @@ public class MatchSlot {
     }
 
     private void drainPendingSlotEvents() throws InterruptedException {
-        SlotEvent e;
+        SlotEvent slotEvent;
         List<String> topicsToAdd = new ArrayList<>(4);
-        while ((e = pendingSlotEvents.poll()) != null) {
-            if (e instanceof AddSymbolEvent add) {
+        while ((slotEvent = pendingSlotEvents.poll()) != null) {
+            if (slotEvent instanceof AddSymbolEvent add) {
                 String symbol = add.getSymbol();
                 if (symbol != null && !symbol.isEmpty()) {
                     MatchEngine engine = enginesBySymbol.putIfAbsent(symbol, new MatchEngine(symbol, MarketConfig.defaultFor(symbol)));
@@ -364,16 +364,16 @@ public class MatchSlot {
                     }
                     topicsToAdd.add(symbolToTopic(symbol));
                 }
-            } else if (e instanceof HaEvent ha) {
+            } else if (slotEvent instanceof HaEvent ha) {
                 if (ha == HaEvent.CLOSE) {
                     running.set(false);
                     throw new InterruptedException("MatchSlot HA close");
                 } else {
                     publishToRingBuffer(SlotTaskEvent.Type.HA, null, ha, 0);
                 }
-            } else if (e instanceof SnapshotEvent snapEv) {
+            } else if (slotEvent instanceof SnapshotEvent snapEv) {
                 publishToRingBuffer(SlotTaskEvent.Type.SNAPSHOT, snapEv.symbol(), null, 0);
-            } else if (e instanceof ComparedEvent compared) {
+            } else if (slotEvent instanceof ComparedEvent compared) {
                 if (ringBuffer != null) {
                     long seq = ringBuffer.next();
                     try {
@@ -470,8 +470,8 @@ public class MatchSlot {
 
                 }
             }
-        } catch (Exception e) {
-            log.warn("MatchSlot disruptor handler error slotIndex={} type={}", index, event.getType(), e);
+        } catch (Exception exception) {
+            log.warn("MatchSlot disruptor handler error slotIndex={} type={}", index, event.getType(), exception);
         }
     }
 
@@ -490,8 +490,8 @@ public class MatchSlot {
             SnapshotFileHelper.write(snapshotDir, symbol, offset, book, book.getMarketConfig(), book.getAppliedMarketConfigVersion());
             book.setSnapshotOffset(offset);
             log.info("snapshot completed symbol={} offset={}", symbol, offset);
-        } catch (Exception e) {
-            log.error("MatchSlot snapshot write failed symbol={} slot={}", symbol, index, e);
+        } catch (Exception exception) {
+            log.error("MatchSlot snapshot write failed symbol={} slot={}", symbol, index, exception);
         }
     }
 
@@ -504,8 +504,8 @@ public class MatchSlot {
         OrderCommand cmd;
         try {
             cmd = ProtocolSerde.orderCommandFromJson(json);
-        } catch (Exception e) {
-            log.warn("Invalid OrderCommand json symbol={} slot={}", symbol, index, e);
+        } catch (Exception exception) {
+            log.warn("Invalid OrderCommand json symbol={} slot={}", symbol, index, exception);
             return;
         }
 
@@ -551,7 +551,7 @@ public class MatchSlot {
     private static String hostname() {
         try {
             return InetAddress.getLocalHost().getHostName();
-        } catch (UnknownHostException e) {
+        } catch (UnknownHostException unknownHostException) {
             return "unknown";
         }
     }

@@ -3,6 +3,7 @@ package com.tk.match.engine.matcher;
 import com.tk.match.engine.BookOrder;
 import com.tk.match.engine.PriceCodec;
 import com.tk.protocol.dto.FinishOrder;
+import com.tk.protocol.dto.RejectReason;
 import com.tk.protocol.dto.FinishStatus;
 import com.tk.protocol.dto.TradeOrder;
 
@@ -24,8 +25,17 @@ public class MatchSupport {
     }
 
     public static FinishOrder finishOrder(BookOrder bookOrder, FinishStatus status, BigDecimal leaveVolume, BigDecimal leaveAmount) {
+        return finishOrder(bookOrder, status, leaveVolume, leaveAmount, null);
+    }
+
+    public static FinishOrder finishOrder(BookOrder bookOrder, FinishStatus status, BigDecimal leaveVolume, RejectReason rejectReason) {
+        return finishOrder(bookOrder, status, leaveVolume, BigDecimal.ZERO, rejectReason);
+    }
+
+    public static FinishOrder finishOrder(BookOrder bookOrder, FinishStatus status, BigDecimal leaveVolume, BigDecimal leaveAmount, RejectReason rejectReason) {
         return FinishOrder.builder().uid(bookOrder.getUid()).orderId(bookOrder.getOrderId()).shardId(bookOrder.getShardId())
                 .status(status).leaveVolume(leaveVolume)
+                .rejectReason(rejectReason)
                 .leaveAmount(leaveAmount)//
                 .build();
     }

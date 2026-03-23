@@ -70,9 +70,9 @@ public class MatchLeaderElectionService {
             leaderLatch.start();
             running = true;
             log.info("match-engine leader election started zookeeper={} path={}", zookeeperServers, latchPath);
-        } catch (Exception e) {
-            log.error("match-engine leader election start failed", e);
-            throw new RuntimeException("Leader election start failed", e);
+        } catch (Exception exception) {
+            log.error("match-engine leader election start failed", exception);
+            throw new RuntimeException("Leader election start failed", exception);
         }
     }
 
@@ -84,16 +84,16 @@ public class MatchLeaderElectionService {
         if (leaderLatch != null) {
             try {
                 leaderLatch.close();
-            } catch (Exception e) {
-                log.warn("LeaderLatch close error", e);
+            } catch (Exception exception) {
+                log.warn("LeaderLatch close error", exception);
             }
             leaderLatch = null;
         }
         if (client != null) {
             try {
                 client.close();
-            } catch (Exception e) {
-                log.warn("CuratorFramework close error", e);
+            } catch (Exception exception) {
+                log.warn("CuratorFramework close error", exception);
             }
             client = null;
         }
@@ -108,9 +108,9 @@ public class MatchLeaderElectionService {
         if (client == null || !running) return 0;
         try {
             return client.getChildren().forPath(latchPath).size();
-        } catch (Exception e) {
+        } catch (Exception exception) {
             if (log.isTraceEnabled()) {
-                log.trace("getParticipantCount failed path={}", latchPath, e);
+                log.trace("getParticipantCount failed path={}", latchPath, exception);
             }
             return 0;
         }

@@ -117,9 +117,9 @@ public class OrderReqProducerRunner {
 
             producer.flush();
             System.out.println("Done. Check match-engine logs and match_result_" + symbol + " topic.");
-        } catch (Exception e) {
-            System.err.println("Error: " + e.getMessage());
-            e.printStackTrace();
+        } catch (Exception exception) {
+            System.err.println("Error: " + exception.getMessage());
+            exception.printStackTrace();
             System.exit(1);
         }
     }

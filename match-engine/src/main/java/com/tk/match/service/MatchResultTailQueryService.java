@@ -49,12 +49,12 @@ public class MatchResultTailQueryService {
         if (bootstrapServers == null || symbols == null || symbols.isEmpty()) {
             return result;
         }
-        for (String s : symbols) {
-            result.put(s, 0L);
+        for (String symbol : symbols) {
+            result.put(symbol, 0L);
         }
         List<TopicPartition> partitions = symbols.stream()
-                .filter(s -> s != null && !s.isEmpty())
-                .map(s -> new TopicPartition(TOPIC_PREFIX + s, 0))
+                .filter(symbol -> symbol != null && !symbol.isEmpty())
+                .map(symbol -> new TopicPartition(TOPIC_PREFIX + symbol, 0))
                 .collect(Collectors.toList());
         if (partitions.isEmpty()) {
             return result;
@@ -70,24 +70,32 @@ public class MatchResultTailQueryService {
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
             consumer.assign(partitions);
             consumer.seekToEnd(partitions);
+            HashMap<String, Long> endMap = new HashMap<>();
             for (TopicPartition tp : partitions) {
                 long end = consumer.position(tp);
                 if (end > 0) {
-                    consumer.seek(tp, end - 1);
+                    endMap.put(tp.topic(), end);
+                    consumer.seek(tp, Math.max(end - 5, 0));
                 }
             }
-            ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(3000));
-            for (ConsumerRecord<String, String> record : records) {
-                String symbol = topicToSymbol(record.topic());
-                if (symbol != null && result.containsKey(symbol)) {
-                    long orderReqOffset = orderReqOffsetFromRecord(record);
-                    result.put(symbol, orderReqOffset > 0 ? orderReqOffset : result.get(symbol));
+            while (!endMap.isEmpty()) {
+                ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(10));
+                for (ConsumerRecord<String, String> record : records) {
+                    Long offset = endMap.get(record.topic());
+                    if (offset != null && record.offset() >= offset) {
+                        endMap.remove(record.topic());
+                    }
+                    String symbol = topicToSymbol(record.topic());
+                    if (symbol != null && result.containsKey(symbol)) {
+                        long orderReqOffset = orderReqOffsetFromRecord(record);
+                        result.put(symbol, orderReqOffset > 0 ? orderReqOffset : result.get(symbol));
+                    }
                 }
             }
-            log.debug("MatchResultTailQueryService batch symbols={} result={}", symbols, result);
+            log.info("MatchResultTailQueryService batch symbols={} result={}", symbols, result);
             return result;
-        } catch (Exception e) {
-            log.warn("MatchResultTailQueryService batch symbols={} failed: {}", symbols, e.getMessage());
+        } catch (Exception exception) {
+            log.warn("MatchResultTailQueryService batch symbols={} failed: {}", symbols, exception.getMessage());
             return result;
         }
     }
@@ -98,11 +106,11 @@ public class MatchResultTailQueryService {
     }
 
     private static long orderReqOffsetFromRecord(ConsumerRecord<String, String> record) {
-        Header h = record.headers().lastHeader("orderReqOffset");
-        if (h == null || h.value() == null) return 0L;
+        Header offsetHeader = record.headers().lastHeader("orderReqOffset");
+        if (offsetHeader == null || offsetHeader.value() == null) return 0L;
         try {
-            return Long.parseLong(new String(h.value(), StandardCharsets.UTF_8));
-        } catch (NumberFormatException e) {
+            return Long.parseLong(new String(offsetHeader.value(), StandardCharsets.UTF_8));
+        } catch (NumberFormatException exception) {
             return 0L;
         }
     }

@@ -62,8 +62,8 @@ public class InboundConsumer {
                         handleRecord(record);
                     }
                 }
-            } catch (Exception e) {
-                logger.error("InboundConsumer loop error", e);
+            } catch (Exception exception) {
+                logger.error("InboundConsumer loop error", exception);
             } finally {
                 running = false;
             }
@@ -97,8 +97,8 @@ public class InboundConsumer {
             }
             CommandMessage message = new CommandMessage(reqId, command, uid, data, record.offset());
             commandRouter.route(message);
-        } catch (Exception e) {
-            logger.error("failed to handle record, offset={}, value={}", record.offset(), record.value(), e);
+        } catch (Exception exception) {
+            logger.error("failed to handle record, offset={}, value={}", record.offset(), record.value(), exception);
         }
     }
 }

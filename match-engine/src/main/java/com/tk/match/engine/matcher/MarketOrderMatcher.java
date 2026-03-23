@@ -4,6 +4,7 @@ import com.tk.match.engine.*;
 import com.tk.protocol.dto.FinishOrder;
 import com.tk.protocol.dto.FinishStatus;
 import com.tk.protocol.dto.MarketConfig;
+import com.tk.protocol.dto.RejectReason;
 import com.tk.protocol.dto.TradeOrder;
 
 import java.math.BigDecimal;
@@ -76,13 +77,13 @@ public final class MarketOrderMatcher implements OrderMatcher {
         BigDecimal amount = taker.getRemainingAmount() != null ? taker.getRemainingAmount() : taker.getAmount();
         if (amount == null || amount.compareTo(mc.getMinTradeQuoteAmount()) < 0) {
             BigDecimal leave = taker.getVolume() != null ? taker.getVolume() : ZERO;
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, leave, amount)));
+            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, leave, amount, RejectReason.INVALID_NOTIONAL)));
         }
         if (taker.getVolume() != null) {
             if (taker.getVolume().compareTo(mc.getMinQty()) < 0) {
-                return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), amount)));
+                return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), amount, RejectReason.INVALID_QUANTITY)));
             } else if (taker.getVolume().stripTrailingZeros().scale() > mc.getQtyScale()) {
-                return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), amount)));
+                return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), amount, RejectReason.INVALID_QUANTITY)));
             }
         }
         return null;
@@ -91,10 +92,10 @@ public final class MarketOrderMatcher implements OrderMatcher {
     private static MatchResult validateMarketSell(BookOrder taker, MarketConfig mc) {
         if (taker.getVolume() == null || taker.getVolume().compareTo(mc.getMinQty()) <= 0) {
             BigDecimal leave = taker.getVolume() != null ? taker.getVolume() : ZERO;
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, leave, taker.getAmount())));
+            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, leave, taker.getAmount(), RejectReason.INVALID_QUANTITY)));
         }
         if (taker.getAmount() != null && taker.getAmount().compareTo(mc.getMinTradeQuoteAmount()) < 0) {
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), taker.getVolume())));
+            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), taker.getVolume(), RejectReason.INVALID_NOTIONAL)));
         }
         return null;
     }

@@ -83,15 +83,15 @@ public class MatchResponseDispatchService {
         if (consumerThread != null) {
             try {
                 consumerThread.join(5000);
-            } catch (InterruptedException e) {
+            } catch (InterruptedException interruptedException) {
                 Thread.currentThread().interrupt();
             }
         }
         if (consumer != null) {
             try {
                 consumer.close();
-            } catch (Exception e) {
-                log.warn("Consumer close", e);
+            } catch (Exception exception) {
+                log.warn("Consumer close", exception);
             }
         }
         log.info("MatchResponseDispatchService stopped");
@@ -114,10 +114,10 @@ public class MatchResponseDispatchService {
                 for (ConsumerRecord<String, String> record : records) {
                     processMatchResponse(record.value());
                 }
-            } catch (org.apache.kafka.common.errors.WakeupException e) {
+            } catch (org.apache.kafka.common.errors.WakeupException wakeupException) {
                 break;
-            } catch (Exception e) {
-                log.warn("message-dispatch consume error", e);
+            } catch (Exception exception) {
+                log.warn("message-dispatch consume error", exception);
             }
         }
     }
@@ -126,14 +126,14 @@ public class MatchResponseDispatchService {
         MatchResponse response;
         try {
             response = ProtocolSerde.matchResponseFromJson(payload);
-        } catch (Exception e) {
-            log.warn("Invalid MatchResponse json: {}", payload, e);
+        } catch (Exception exception) {
+            log.warn("Invalid MatchResponse json: {}", payload, exception);
             return;
         }
         Map<Long, TradingSettle> settles = TradingSettleTransformer.fromMatchResponse(response);
-        for (Map.Entry<Long, TradingSettle> e : settles.entrySet()) {
-            Long uid = e.getKey();
-            TradingSettle settle = e.getValue();
+        for (Map.Entry<Long, TradingSettle> settleEntry : settles.entrySet()) {
+            Long uid = settleEntry.getKey();
+            TradingSettle settle = settleEntry.getValue();
             String topic = "trading_" + settle.getShardId();
 
             JSONObject message = new JSONObject();

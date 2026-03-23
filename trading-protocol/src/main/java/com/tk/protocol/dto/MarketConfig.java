@@ -61,4 +61,12 @@ public class MarketConfig {
         return minQty == null ? new BigDecimal("0.0000001") : minQty;
     }
 
+    /***
+     *
+     * trading-shard 到 进入kafka 最长耗时
+     */
+    public long getMaxValidTime() {
+        return 1000 * 30;
+    }
+
 }

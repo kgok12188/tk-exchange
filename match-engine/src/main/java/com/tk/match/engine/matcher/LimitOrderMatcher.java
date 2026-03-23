@@ -3,6 +3,7 @@ package com.tk.match.engine.matcher;
 import com.tk.match.engine.*;
 import com.tk.protocol.dto.FinishOrder;
 import com.tk.protocol.dto.FinishStatus;
+import com.tk.protocol.dto.RejectReason;
 import com.tk.protocol.dto.TradeOrder;
 
 import java.math.BigDecimal;
@@ -62,14 +63,14 @@ public class LimitOrderMatcher implements OrderMatcher {
     @Override
     public MatchResult validate(BookOrder taker) {
         if (taker.getPrice() == null || taker.getPrice().compareTo(ZERO) <= 0) {
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getRemainingVolume())));
+            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getRemainingVolume(), RejectReason.INVALID_PRICE)));
         }
         BigDecimal vol = taker.getRemainingVolume();
         if (MarketRules.shouldRejectQuantity(vol, orderBook.getMarketConfig())) {
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol)));
+            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.INVALID_QUANTITY)));
         }
         if (!MarketRules.isPriceCompliant(taker.getPrice(), orderBook.getMarketConfig())) {
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol)));
+            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.PRICE_TICK_INVALID)));
         }
         return null;
     }
@@ -77,8 +78,8 @@ public class LimitOrderMatcher implements OrderMatcher {
     /**
      * @return {@code true} 表示 taker 仍有剩余量，外层应继续扫下一对手价位；{@code false} 表示 taker 已全成，无需再穿价撮合。
      */
-    private boolean matchAtPriceLevel(OrderBook book, BookOrder takerOrder, long orderReqOffset, long oppositeTicks,
-                                      int scale, PriceLevel level, List<TradeOrder> trades, List<FinishOrder> finishes) {
+    protected boolean matchAtPriceLevel(OrderBook book, BookOrder takerOrder, long orderReqOffset, long oppositeTicks,
+                                        int scale, PriceLevel level, List<TradeOrder> trades, List<FinishOrder> finishes) {
         while (!level.isEmpty() && takerHasRemainingVolume(takerOrder)) {
             BookOrder makerOrder = level.peekFirst();
             BigDecimal fill = takerOrder.getRemainingVolume().min(makerOrder.getRemainingVolume());
@@ -95,7 +96,7 @@ public class LimitOrderMatcher implements OrderMatcher {
         return takerHasRemainingVolume(takerOrder);
     }
 
-    private boolean takerHasRemainingVolume(BookOrder takerOrder) {
+    protected boolean takerHasRemainingVolume(BookOrder takerOrder) {
         return takerOrder.getRemainingVolume().compareTo(ZERO) > 0;
     }
 
