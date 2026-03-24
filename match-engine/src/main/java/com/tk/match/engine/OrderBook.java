@@ -1,6 +1,7 @@
 package com.tk.match.engine;
 
 import com.tk.match.engine.matcher.*;
+import com.tk.match.slot.ArrayStackBookOrder;
 import com.tk.match.snapshot.SnapshotLoadResult;
 import com.tk.match.snapshot.SnapshotMetadata;
 import com.tk.protocol.dto.*;
@@ -82,8 +83,9 @@ public final class OrderBook {
     private static final int DUPLICATE_ID_WINDOW_SIZE = 4;
     private static final int DUPLICATE_ID_WINDOW_INTERVAL_MILLIS = 1000 * 60 * 15;
     private final transient OrderIdDeduplicate orderIdDeduplicate;
+    private final ArrayStackBookOrder arrayStackBookOrder;
 
-    public OrderBook(String symbol, MarketConfig marketConfig) {
+    public OrderBook(String symbol, MarketConfig marketConfig, ArrayStackBookOrder arrayStackBookOrder) {
         if (StringUtils.isEmpty(symbol) || marketConfig == null) {
             throw new IllegalArgumentException("symbol is empty");
         }
@@ -91,6 +93,7 @@ public final class OrderBook {
         this.marketConfig = marketConfig;
         this.matchResultTopic = "match_result_" + symbol;
         orderIdDeduplicate = new OrderIdDeduplicate(DUPLICATE_ID_WINDOW_SIZE, DUPLICATE_ID_WINDOW_INTERVAL_MILLIS);
+        this.arrayStackBookOrder = arrayStackBookOrder;
     }
 
     /**
@@ -213,35 +216,52 @@ public final class OrderBook {
 
     public MatchResult pushOrder(OrderPayload payload, long orderReqOffset, long timestamp) {
 
-        BookOrder takerOrder = new BookOrder(payload, orderReqOffset, marketConfig);
+        BookOrder takerOrder = arrayStackBookOrder.pop().parse(payload, orderReqOffset, marketConfig);
 
         if ((timestamp - payload.getCreateTime()) > marketConfig.getMaxValidTime() || payload.getCreateTime() > timestamp) {
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.ORDER_EXPIRED)));
+            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.ORDER_EXPIRED)));
+            recycleBookOrder(takerOrder);
+            return result;
         }
 
         if (takerOrder.getOrderId() <= 0) {
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_ORDER_ID)));
+            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_ORDER_ID)));
+            recycleBookOrder(takerOrder);
+            return result;
         }
+
         if (orderIdDeduplicate.isDuplicate(takerOrder.getOrderId(), ordersById, timestamp)) {
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.DUPLICATE_ORDER_ID)));
+            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.DUPLICATE_ORDER_ID)));
+            recycleBookOrder(takerOrder);
+            return result;
         }
 
         TimeInForce timeInForce = TimeInForce.fromWire(payload.getTimeInForce());
-        if (isLimitOrder(payload.getPriceType()) && payload.getTimeInForce() != null && timeInForce == null) {
-            return MatchResult.of(Collections.emptyList(), List.of(
+        if (isLimitOrder(payload.getPriceType()) && timeInForce == null) {
+            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(
                     finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_TIME_IN_FORCE)
             ));
+            recycleBookOrder(takerOrder);
+            return result;
         }
 
         OrderMatcher matcher = selectMatcher(payload.getPriceType(), timeInForce);
         if (matcher == null) {
-            return MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_PRICE_TYPE)));
+            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_PRICE_TYPE)));
+            recycleBookOrder(takerOrder);
+            return result;
         }
         MatchResult invalid = matcher.validate(takerOrder);
         if (invalid != null) {
+            recycleBookOrder(takerOrder);
             return invalid;
         }
-        return matcher.match(takerOrder, orderReqOffset);
+        MatchResult result = matcher.match(takerOrder, orderReqOffset);
+        BookOrder inBookOrder = ordersById.get(takerOrder.getOrderId());
+        if (inBookOrder != takerOrder) {
+            recycleBookOrder(takerOrder);
+        }
+        return result;
     }
 
     private OrderMatcher selectMatcher(String priceType, TimeInForce timeInForce) {
@@ -266,7 +286,7 @@ public final class OrderBook {
     }
 
     private boolean isLimitOrder(String priceType) {
-        return priceType != null && "LIMIT".equalsIgnoreCase(priceType);
+        return StringUtils.equalsIgnoreCase(priceType, "LIMIT");
     }
 
     public MatchResult cancelOrder(Long orderId) {
@@ -290,6 +310,7 @@ public final class OrderBook {
         ordersById.remove(order.getOrderId());
         orderCount--;
         removeFromBook(order);
+        recycleBookOrder(order);
     }
 
     public void addToBook(BookOrder order) {
@@ -340,6 +361,13 @@ public final class OrderBook {
 
     private static MatchResult emptyResult() {
         return MatchResult.of(Collections.emptyList(), Collections.emptyList());
+    }
+
+    public void recycleBookOrder(BookOrder order) {
+        if (order == null) {
+            return;
+        }
+        arrayStackBookOrder.add(order);
     }
 
 }

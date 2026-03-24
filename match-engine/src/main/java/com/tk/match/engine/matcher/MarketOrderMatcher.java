@@ -1,11 +1,7 @@
 package com.tk.match.engine.matcher;
 
 import com.tk.match.engine.*;
-import com.tk.protocol.dto.FinishOrder;
-import com.tk.protocol.dto.FinishStatus;
-import com.tk.protocol.dto.MarketConfig;
-import com.tk.protocol.dto.RejectReason;
-import com.tk.protocol.dto.TradeOrder;
+import com.tk.protocol.dto.*;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -79,7 +75,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
             BigDecimal leave = taker.getVolume() != null ? taker.getVolume() : ZERO;
             return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, leave, amount, RejectReason.INVALID_NOTIONAL)));
         }
-        if (taker.getVolume() != null) {
+        if (taker.getVolume() != null && taker.getVolume().compareTo(ZERO) > 0) {
             if (taker.getVolume().compareTo(mc.getMinQty()) < 0) {
                 return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), amount, RejectReason.INVALID_QUANTITY)));
             } else if (taker.getVolume().stripTrailingZeros().scale() > mc.getQtyScale()) {
@@ -94,7 +90,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
             BigDecimal leave = taker.getVolume() != null ? taker.getVolume() : ZERO;
             return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, leave, taker.getAmount(), RejectReason.INVALID_QUANTITY)));
         }
-        if (taker.getAmount() != null && taker.getAmount().compareTo(mc.getMinTradeQuoteAmount()) < 0) {
+        if (taker.getAmount() != null && taker.getAmount().compareTo(ZERO) > 0 && taker.getAmount().compareTo(mc.getMinTradeQuoteAmount()) < 0) {
             return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getVolume(), taker.getVolume(), RejectReason.INVALID_NOTIONAL)));
         }
         return null;

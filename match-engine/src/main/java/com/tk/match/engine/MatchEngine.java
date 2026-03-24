@@ -1,5 +1,6 @@
 package com.tk.match.engine;
 
+import com.tk.match.slot.ArrayStackBookOrder;
 import com.tk.protocol.dto.*;
 import lombok.Getter;
 
@@ -19,9 +20,9 @@ public class MatchEngine {
     private final String symbol;
     private final OrderBook book;
 
-    public MatchEngine(String symbol, MarketConfig initialConfig) {
+    public MatchEngine(String symbol, MarketConfig initialConfig, ArrayStackBookOrder arrayStackBookOrder) {
         this.symbol = symbol;
-        this.book = new OrderBook(symbol, initialConfig);
+        this.book = new OrderBook(symbol, initialConfig, arrayStackBookOrder);
     }
 
     /**
@@ -49,7 +50,7 @@ public class MatchEngine {
                     return null;
                 }
                 takerRef = TakerRef.builder().uid(push.getUid()).orderId(push.getId()).shardId(push.getShardId()).build();
-                MatchResult result = book.pushOrder(push, orderReqOffset,timestamp);
+                MatchResult result = book.pushOrder(push, orderReqOffset, timestamp);
                 trades.addAll(result.getTrades());
                 finishOrders.addAll(result.getFinishOrders());
                 break;

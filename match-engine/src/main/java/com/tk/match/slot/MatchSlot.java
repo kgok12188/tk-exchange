@@ -78,6 +78,8 @@ public class MatchSlot {
 
     private volatile boolean isMaster = false;
 
+    private final ArrayStackBookOrder arrayStackBookOrder = new ArrayStackBookOrder(4096);
+
     /**
      * 数据面是否为主：与 {@code process} 中写 Kafka / 写 slave 文件队列分支一致；由 HA 事件在补发完成后置位。
      */
@@ -181,7 +183,7 @@ public class MatchSlot {
         Map<String, Long> seekOffsetBySymbol = new HashMap<>();
         for (String symbol : symbols) {
             log.info("start restore symbol={} from snapshot", symbol);
-            MatchEngine engine = new MatchEngine(symbol, MarketConfig.defaultFor(symbol));
+            MatchEngine engine = new MatchEngine(symbol, MarketConfig.defaultFor(symbol), arrayStackBookOrder);
             if (snapshotDir != null) {
                 SnapshotLoadResult loaded = SnapshotFileHelper.load(snapshotDir, symbol);
                 if (loaded != null) {
@@ -356,7 +358,7 @@ public class MatchSlot {
             if (slotEvent instanceof AddSymbolEvent add) {
                 String symbol = add.getSymbol();
                 if (symbol != null && !symbol.isEmpty()) {
-                    MatchEngine engine = enginesBySymbol.putIfAbsent(symbol, new MatchEngine(symbol, MarketConfig.defaultFor(symbol)));
+                    MatchEngine engine = enginesBySymbol.putIfAbsent(symbol, new MatchEngine(symbol, MarketConfig.defaultFor(symbol), arrayStackBookOrder));
                     if (engine == null && add.getInitialMasterOffset() > 0) {
                         enginesBySymbol.get(symbol).getBook().updateMasterReqOffsetIfGreater(add.getInitialMasterOffset());
                     } else if (engine != null && add.getInitialMasterOffset() > 0) {
