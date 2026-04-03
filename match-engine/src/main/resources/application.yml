@@ -26,11 +26,11 @@ match:
     - BTC-USDT
     - ETH-USDT
   # 订单簿快照（启动恢复）：目录为空则禁用
-  snapshot-dir: "/tmp/match-engine-snapshot-02/"
+  snapshot-dir: "/tmp/match-engine-snapshot/"
   snapshot-enabled: true
   snapshot-interval-ms: 300000
   # 从节点文件队列根目录；非空时从节点将 MatchResponse 写入该目录下每币一个 Chronicle Queue
-  file-queue-dir: "/tmp/match-engine-02/"
+  file-queue-dir: "/tmp/match-engine-queue/"
   # Zookeeper 连接串（如 127.0.0.1:2181）；为空则不启用主从选举
   zookeeper-servers: "zookeeper:2181"
   # 主从选举在 ZK 上的节点路径（仅 zookeeper-servers 非空时生效）
