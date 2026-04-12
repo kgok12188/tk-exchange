@@ -9,12 +9,17 @@
         <version>1.0</version>
     </parent>
 
-    <artifactId>job-service</artifactId>
+    <artifactId>tk-open-api</artifactId>
 
     <dependencies>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>tk</groupId>
+            <artifactId>trading-protocol</artifactId>
+            <version>1.0</version>
         </dependency>
         <dependency>
             <groupId>com.zaxxer</groupId>
@@ -31,12 +36,19 @@
             <version>${mybatis-plus-boot-stater.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.xuxueli</groupId>
-            <artifactId>xxl-job-core</artifactId>
-            <version>2.3.1</version>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka_2.13</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.dianping.cat</groupId>
+            <artifactId>cat-client</artifactId>
+            <version>3.1.0</version>
         </dependency>
     </dependencies>
-
 
     <build>
         <plugins>

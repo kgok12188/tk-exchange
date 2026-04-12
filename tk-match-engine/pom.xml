@@ -10,7 +10,7 @@
         <version>1.0</version>
     </parent>
 
-    <artifactId>match-engine</artifactId>
+    <artifactId>tk-match-engine</artifactId>
 
     <properties>
         <!-- Chronicle Queue (and related OpenHFT libs) require these JVM args on Java 21+; vectorizedMismatch needs jdk.internal.util -->
