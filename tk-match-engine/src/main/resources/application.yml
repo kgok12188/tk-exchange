@@ -1,42 +1,21 @@
-server:
-  port: 8092
-  shutdown: graceful
-
 spring:
-  main:
-    allow-bean-definition-overriding: true
-    allow-circular-references: true
-  lifecycle:
-    timeout-per-shutdown-phase: 60s
-  datasource:
-    url: jdbc:mysql://localhost:3306/futures
-    username: root
-    password: admin123
-    driver-class-name: com.mysql.cj.jdbc.Driver
   application:
-    name: spot-match-engine
+    name: tk-match-engine
+  main:
+    web-application-type: none
 
-kafka:
-  servers: kafka:9092
-
-# 撮合引擎：启动时创建 ringBuffer 槽位，Kafka 消费后按 symbol 哈希推送到对应槽位
+# 仅覆盖与代码默认值不同的路径；其余 Aeron 参数见 ClusterStackConfig / MdcEgressConfig 内默认值
+# cluster-members 紧凑格式：id=host:ingress:consensus:log:catchup:archive ，多节点用 | 分隔
 match:
-  slots: 4
-  symbols:
-    - BTC-USDT
-    - ETH-USDT
-  # 订单簿快照（启动恢复）：目录为空则禁用
-  snapshot-dir: "/tmp/match-engine-snapshot/"
-  snapshot-enabled: true
-  snapshot-interval-ms: 300000
-  # 从节点文件队列根目录；非空时从节点将 MatchResponse 写入该目录下每币一个 Chronicle Queue
-  file-queue-dir: "/tmp/match-engine-queue/"
-  # Zookeeper 连接串（如 127.0.0.1:2181）；为空则不启用主从选举
-  zookeeper-servers: "zookeeper:2181"
-  # 主从选举在 ZK 上的节点路径（仅 zookeeper-servers 非空时生效）
-  leader-latch-path: "/match-engine/leader/g1"
-  # 主从文件队列状态机一致性抽样比对（仅从节点且 file-queue-dir 非空时执行）
-  consistency-check-enabled: true
-  consistency-check-interval-ms: 60000
-  consistency-check-sample-size: 100
+  cluster:
+    archive-dir: /tmp/match-engine/node0/archive
+    cluster-dir: /tmp/match-engine/node0/cluster
+    aeron-dir: /tmp/aeron-match-0
+  mdc:
+    aeron-dir: /tmp/aeron-mdc-0
 
+logging:
+  level:
+    com.tk.match: INFO
+    io.aeron: WARN
+    org.agrona: WARN

@@ -9,7 +9,6 @@ import com.tk.protocol.dto.RejectReason;
 
 import java.math.BigDecimal;
 import java.util.Collections;
-import java.util.List;
 
 /**
  * LIMIT_MAKER (post-only) order: must rest on book as maker. If it would cross the spread, reject entire order.
@@ -26,7 +25,7 @@ public class LimitMakerOrderMatcher extends LimitOrderMatcher {
             // taker 尚未 addToBook，无需从簿中移除
             BigDecimal leaveVolume = takerOrder.getRemainingVolume() != null ? takerOrder.getRemainingVolume() : BigDecimal.ZERO;
             FinishOrder fo = MatchSupport.finishOrder(takerOrder, FinishStatus.POST_ONLY_REJECT, leaveVolume, RejectReason.POST_ONLY_WOULD_CROSS);
-            return MatchResult.of(Collections.emptyList(), List.of(fo));
+            return MatchResult.of(Collections.emptyList(), Collections.singletonList(fo));
         }
         orderBook.addToBook(takerOrder);
         return MatchResult.of(Collections.emptyList(), Collections.emptyList());

@@ -1,6 +1,5 @@
 package com.tk.match.engine;
 
-import com.tk.match.slot.ArrayStackBookOrder;
 import com.tk.protocol.dto.*;
 import lombok.Getter;
 
@@ -9,10 +8,12 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Per-symbol match engine: state machine driven by OrderCommand, output MatchResponse.
- * Uses only protocol DTOs; single-threaded per symbol.
+ * Per-symbol match engine: deterministic state machine, single-threaded.
+ * Driven by ordered commands from Aeron Cluster Raft log (onSessionMessage).
  * <p>
- * orderReqOffset in TradeOrder (protocol field matchId) is set to the order_req Kafka offset; index is the 0-based trade sequence as the taker eats.
+ * {@code seq} replaces the old Kafka orderReqOffset: it is the global {@code matchSeq}
+ * assigned by {@code MatchClusteredService}, used for BookOrder price-time priority.
+ * Raft consensus guarantees each command is processed exactly once — no in-engine dedup needed.
  */
 @Getter
 public class MatchEngine {
@@ -26,63 +27,71 @@ public class MatchEngine {
     }
 
     /**
-     * Process one command in order; returns response if there are trades or finish orders.
+     * Process one command. Returns a MatchResponse if there are trades or finish orders,
+     * or null for no-op commands. Callers (ClusteredService) must wrap null → empty MatchResult.
      *
-     * @param orderReqOffset Kafka partition offset of the order_req record (used as orderReqOffset for all trades from this command).
+     * @param cmd       decoded command (PUSH_ORDER / CANCEL_ORDER / UPDATE_MARKET)
+     * @param seq       global matchSeq from ClusteredService (used for price-time priority in book)
+     * @param timestamp cluster timestamp (epoch ms)
      */
-    public MatchResponse process(OrderCommand cmd, long orderReqOffset, long timestamp) {
-        if (orderReqOffset <= book.getReqOffset()) {
-            return null;
-        }
-        book.setReqOffset(orderReqOffset);
+    public MatchResponse process(OrderCommand cmd, long seq, long timestamp) {
         if (cmd == null || cmd.getType() == null) {
             return null;
         }
-        List<TradeOrder> trades = new ArrayList<>(4);
-        List<FinishOrder> finishOrders = new ArrayList<>(4);
-        TakerRef takerRef = null;
         switch (cmd.getType()) {
             case UPDATE_MARKET:
-                return processUpdateMarket(cmd, orderReqOffset);
+                return processUpdateMarket(cmd, seq);
             case PUSH_ORDER: {
                 OrderPayload push = cmd.getPushPayload();
                 if (push == null) {
                     return null;
                 }
-                takerRef = TakerRef.builder().uid(push.getUid()).orderId(push.getId()).shardId(push.getShardId()).build();
-                MatchResult result = book.pushOrder(push, orderReqOffset, timestamp);
-                trades.addAll(result.getTrades());
-                finishOrders.addAll(result.getFinishOrders());
-                break;
+                TakerRef takerRef = TakerRef.builder()
+                        .uid(push.getUid())
+                        .orderId(push.getId())
+                        .shardId(push.getShardId())
+                        .build();
+                MatchResult result = book.pushOrder(push, seq, timestamp);
+                return MatchResponse.builder()
+                        .taker(takerRef)
+                        .trades(result.getTrades())
+                        .finishOrders(result.getFinishOrders())
+                        .build();
             }
             case CANCEL_ORDER: {
                 CancelPayload cancel = cmd.getCancelPayload();
                 if (cancel == null) {
                     return null;
                 }
+                TakerRef takerRef = null;
                 if (cancel.getUid() != null) {
-                    takerRef = TakerRef.builder().uid(cancel.getUid()).shardId(cancel.getShardId()).orderId(cancel.getOrderId()).build();
+                    takerRef = TakerRef.builder()
+                            .uid(cancel.getUid())
+                            .shardId(cancel.getShardId())
+                            .orderId(cancel.getOrderId())
+                            .build();
                 }
                 MatchResult result = book.cancelOrder(cancel.getOrderId());
-                finishOrders.addAll(result.getFinishOrders());
-                break;
+                return MatchResponse.builder()
+                        .taker(takerRef)
+                        .trades(Collections.emptyList())
+                        .finishOrders(result.getFinishOrders())
+                        .build();
             }
             default:
                 return null;
         }
-        return MatchResponse.builder().taker(takerRef).trades(trades).offset(orderReqOffset).finishOrders(finishOrders).build();
     }
 
-    private MatchResponse processUpdateMarket(OrderCommand cmd, long orderReqOffset) {
+    private MatchResponse processUpdateMarket(OrderCommand cmd, long seq) {
         MarketUpdatePayload marketUpdatePayload = cmd.getMarketUpdatePayload();
         if (marketUpdatePayload == null || marketUpdatePayload.getMarketConfig() == null) {
             return null;
         }
         if (marketUpdatePayload.getConfigVersion() <= book.getAppliedMarketConfigVersion()) {
-            return MatchResponse.builder().taker(null).trades(Collections.emptyList()).offset(orderReqOffset).finishOrders(Collections.emptyList()).build();
+            return emptyResponse();
         }
         MarketConfig cfg = marketUpdatePayload.getMarketConfig();
-
         if (cfg.getSymbol() != null && !cfg.getSymbol().equals(symbol)) {
             return null;
         }
@@ -90,16 +99,26 @@ public class MatchEngine {
 
         List<BookOrder> nonCompliantOrders = book.findNonCompliantOrders(effective);
         if (!nonCompliantOrders.isEmpty() && !marketUpdatePayload.isForce()) {
-            return MatchResponse.builder().taker(null).trades(Collections.emptyList()).offset(orderReqOffset).finishOrders(Collections.emptyList()).build();
+            return emptyResponse();
         }
         List<FinishOrder> finishes = new ArrayList<>();
-        if (!nonCompliantOrders.isEmpty()) {
-            for (BookOrder nonCompliant : nonCompliantOrders) {
-                MatchResult cancelResult = book.cancelOrder(nonCompliant.getOrderId());
-                finishes.addAll(cancelResult.getFinishOrders());
-            }
+        for (BookOrder nonCompliant : nonCompliantOrders) {
+            MatchResult cancelResult = book.cancelOrder(nonCompliant.getOrderId());
+            finishes.addAll(cancelResult.getFinishOrders());
         }
         book.applyMarketConfig(effective, marketUpdatePayload.getConfigVersion());
-        return MatchResponse.builder().taker(null).trades(Collections.emptyList()).offset(orderReqOffset).finishOrders(finishes).build();
+        return MatchResponse.builder()
+                .taker(null)
+                .trades(Collections.emptyList())
+                .finishOrders(finishes)
+                .build();
+    }
+
+    private static MatchResponse emptyResponse() {
+        return MatchResponse.builder()
+                .taker(null)
+                .trades(Collections.emptyList())
+                .finishOrders(Collections.emptyList())
+                .build();
     }
 }

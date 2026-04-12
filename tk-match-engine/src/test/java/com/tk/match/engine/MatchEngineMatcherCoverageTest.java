@@ -1,6 +1,5 @@
 package com.tk.match.engine;
 
-import com.tk.match.slot.ArrayStackBookOrder;
 import com.tk.protocol.dto.CommandType;
 import com.tk.protocol.dto.FinishOrder;
 import com.tk.protocol.dto.FinishStatus;
@@ -13,6 +12,7 @@ import com.tk.protocol.dto.TradeOrder;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -179,7 +179,7 @@ class MatchEngineMatcherCoverageTest {
         MatchResponse invalidQtyResponse = matchEngine.process(limitOrder(31002L, 31102L, "BUY", "100.00", "0.0001", "GTC"), 2L, BASE_TIMESTAMP);
         MatchResponse invalidTickResponse = matchEngine.process(limitOrder(31003L, 31103L, "BUY", "100.001", "1.0000", "GTC"), 3L, BASE_TIMESTAMP);
 
-        List<RejectReason> rejectReasons = List.of(
+        List<RejectReason> rejectReasons = Arrays.asList(
                 invalidPriceResponse.getFinishOrders().get(0).getRejectReason(),
                 invalidQtyResponse.getFinishOrders().get(0).getRejectReason(),
                 invalidTickResponse.getFinishOrders().get(0).getRejectReason()

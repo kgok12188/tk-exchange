@@ -9,7 +9,6 @@ import com.tk.protocol.dto.RejectReason;
 
 import java.math.BigDecimal;
 import java.util.Collections;
-import java.util.List;
 
 /**
  * LIMIT + FOK: fill completely now, otherwise reject without book mutation.
@@ -23,7 +22,7 @@ public class LimitFokOrderMatcher extends LimitOrderMatcher {
     @Override
     public MatchResult match(BookOrder takerOrder, long orderReqOffset) {
         if (!canFullyFillNow(takerOrder)) {
-            return MatchResult.of(Collections.emptyList(), List.of(
+            return MatchResult.of(Collections.emptyList(), Collections.singletonList(
                     MatchSupport.finishOrder(
                             takerOrder,
                             FinishStatus.REJECT,

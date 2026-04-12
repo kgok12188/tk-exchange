@@ -1,7 +1,5 @@
 package com.tk.match.engine;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.tk.protocol.dto.MarketConfig;
 import com.tk.protocol.dto.OrderPayload;
 import lombok.Data;
@@ -17,7 +15,6 @@ import java.math.BigDecimal;
  * 限价单：通常仅使用 volume/remainingVolume 与 price；{@code amount}/{@code remainingAmount} 为 null。
  */
 @Data
-@JsonIgnoreProperties(ignoreUnknown = true)
 public class BookOrder {
 
     private long orderId;
@@ -29,7 +26,6 @@ public class BookOrder {
      * 与 {@link OrderBook} 的 {@code priceScale} 一致的定点价格刻度；用于 ART 索引与比较（LIMIT 单必填，MARKET 等可为 0）。
      */
     @EqualsAndHashCode.Exclude
-    @JsonIgnore
     private transient long priceTicks;
     private BigDecimal remainingVolume;
     /**
@@ -40,17 +36,13 @@ public class BookOrder {
     private boolean sideBuy;
 
     @EqualsAndHashCode.Exclude
-    @JsonIgnore
     private BigDecimal amount;
     @EqualsAndHashCode.Exclude
-    @JsonIgnore
     private BigDecimal remainingAmount;
     @EqualsAndHashCode.Exclude
-    @JsonIgnore
-    private BookOrder prevInPriceLevel;
+    private transient BookOrder prevInPriceLevel;
     @EqualsAndHashCode.Exclude
-    @JsonIgnore
-    private BookOrder nextInPriceLevel;
+    private transient BookOrder nextInPriceLevel;
 
     public BookOrder() {
 

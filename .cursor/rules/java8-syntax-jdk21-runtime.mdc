@@ -1,0 +1,41 @@
+---
+description: 源码与生成代码使用 Java 8 语法子集；构建与运行使用 JDK 21
+alwaysApply: true
+---
+
+# Java 语法与运行环境
+
+## 运行与构建（固定）
+
+- **运行与编译 JDK**：**21**（Spring Boot 3.x、Aeron、SBE 工具链等要求；不得将主工程 `maven-compiler-plugin` 的 `release`/`target` 降为 8）。
+- **Maven / CI**：`JAVA_HOME` 与 `mvn` 使用的 JVM 须为 **JDK 21+**（与根 `pom` 中 enforcer 一致）。
+
+## 语法风格（Java 8 子集）
+
+在**手写代码**以及**审阅/约束生成代码**（含 SBE 生成类周边包装、脚本生成的 Java）时，**语言特性**限制在 **Java 8 及以前**可表达的写法，避免依赖更高版本语法糖，便于阅读、diff 与后续降级评估。
+
+### 允许（Java 8 常见特性）
+
+- `lambda`、方法引用、`java.util.stream`、`Optional`（按需）
+- `try-with-resources`（Java 7+）
+- 接口 `default` 方法（Java 8）
+- 静态导入（适度）
+
+### 避免（高于 Java 8 的语法）
+
+- **`var` 局部类型推断**（Java 10+）
+- **`record`**
+- **文本块** `"""..."""`（Java 15+）
+- **`switch` 表达式 / `yield`**（Java 14+ 起演进特性）
+- **`instanceof` 模式匹配、`switch` 模式匹配**（Java 16+）
+- **`sealed` 类、`permits`**
+- 仅用于缩写的 **module-info** 新要求（除非项目统一引入模块系统）
+
+### 生成代码（如 SBE）
+
+- 生成器输出由工具版本决定；若可选目标语言版本，**优先选择与 Java 8 源码兼容的选项**。
+- 项目内**手写**的编解码、适配层须遵守本节「Java 8 子集」规则。
+
+## 说明
+
+「Java 8 语法」指**语言层面**约束，**不是**把字节码级别设为 8：本仓库主模块仍按 **JDK 21** 编译运行，与上述风格并存。

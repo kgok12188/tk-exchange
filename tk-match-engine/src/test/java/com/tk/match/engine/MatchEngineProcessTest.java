@@ -1,6 +1,5 @@
 package com.tk.match.engine;
 
-import com.tk.match.slot.ArrayStackBookOrder;
 import com.tk.protocol.dto.CancelPayload;
 import com.tk.protocol.dto.CommandType;
 import com.tk.protocol.dto.FinishStatus;

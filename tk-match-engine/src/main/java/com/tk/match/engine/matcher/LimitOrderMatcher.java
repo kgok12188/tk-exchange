@@ -63,14 +63,14 @@ public class LimitOrderMatcher implements OrderMatcher {
     @Override
     public MatchResult validate(BookOrder taker) {
         if (taker.getPrice() == null || taker.getPrice().compareTo(ZERO) <= 0) {
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getRemainingVolume(), RejectReason.INVALID_PRICE)));
+            return MatchResult.of(Collections.emptyList(), Collections.singletonList(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getRemainingVolume(), RejectReason.INVALID_PRICE)));
         }
         BigDecimal vol = taker.getRemainingVolume();
         if (MarketRules.shouldRejectQuantity(vol, orderBook.getMarketConfig())) {
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.INVALID_QUANTITY)));
+            return MatchResult.of(Collections.emptyList(), Collections.singletonList(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.INVALID_QUANTITY)));
         }
         if (!MarketRules.isPriceCompliant(taker.getPrice(), orderBook.getMarketConfig())) {
-            return MatchResult.of(Collections.emptyList(), List.of(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.PRICE_TICK_INVALID)));
+            return MatchResult.of(Collections.emptyList(), Collections.singletonList(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.PRICE_TICK_INVALID)));
         }
         return null;
     }

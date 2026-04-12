@@ -1,0 +1,9 @@
+---
+description: 禁止新增 package-info.java
+alwaysApply: true
+---
+
+# 禁止 package-info.java
+
+- 不要创建、不要建议创建 `package-info.java`（含任意包路径）。
+- 包级说明如需保留，写在关键类型的类 Javadoc 或模块 README（仅当用户明确要求文档时再写 README）。

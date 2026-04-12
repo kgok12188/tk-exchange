@@ -1,58 +1,49 @@
 package com.tk.match.engine;
 
 import com.tk.match.engine.matcher.*;
-import com.tk.match.slot.ArrayStackBookOrder;
-import com.tk.match.snapshot.SnapshotLoadResult;
-import com.tk.match.snapshot.SnapshotMetadata;
 import com.tk.protocol.dto.*;
 import exchange.core2.collections.art.LongAdaptiveRadixTreeMap;
 import exchange.core2.collections.art.LongObjConsumer;
 import lombok.Getter;
-import lombok.Setter;
 import org.apache.commons.lang3.StringUtils;
 
 import java.math.BigDecimal;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static com.tk.match.engine.matcher.MatchSupport.finishOrder;
 
 /**
  * High-performance in-memory order book: price-time priority, single-threaded per symbol.
- * 价格档位索引使用 {@link LongAdaptiveRadixTreeMap}（long 定点刻度键，借鉴 exchange-core）；档内仍为 FIFO {@link PriceLevel}。
+ * Price level index uses {@link LongAdaptiveRadixTreeMap} (long fixed-point tick key).
+ * Within each level, FIFO ordering is maintained by {@link PriceLevel}.
+ * <p>
+ * In the Aeron Cluster model, {@code seq} (= matchSeq from ClusteredService) replaces the old
+ * Kafka orderReqOffset for price-time priority ordering of resting orders.
  */
 public final class OrderBook {
 
     @Getter
-    private String matchResultTopic;
-
-    @Getter
     private final String symbol;
 
-    /**
-     * 当前生效的撮合规则；{@link #applyMarketConfig} / 快照加载时更新。
-     */
     @Getter
     private MarketConfig marketConfig;
 
-    /**
-     * 已应用的 {@link com.tk.protocol.dto.MarketUpdatePayload#getConfigVersion()}；-1 表示未经过 UPDATE_MARKET。
-     */
+    /** Last applied {@link MarketUpdatePayload#getConfigVersion()}; -1 = never updated. */
     @Getter
     private long appliedMarketConfigVersion = -1L;
 
-    /**
-     * Bid：价格从高到低遍历用 {@link LongAdaptiveRadixTreeMap#forEachDesc} / {@link LongAdaptiveRadixTreeMap#getLowerValue(long)}。
-     */
+    /** Bid side: iterate desc for best bid. */
     private final LongAdaptiveRadixTreeMap<PriceLevel> buySide = new LongAdaptiveRadixTreeMap<>();
-    /**
-     * Ask：价格从低到高用 {@link LongAdaptiveRadixTreeMap#forEach} / {@link LongAdaptiveRadixTreeMap#getHigherValue(long)}。
-     */
+
+    /** Ask side: iterate asc for best ask. */
     private final LongAdaptiveRadixTreeMap<PriceLevel> sellSide = new LongAdaptiveRadixTreeMap<>();
+
     @Getter
     private final LongAdaptiveRadixTreeMap<BookOrder> ordersById = new LongAdaptiveRadixTreeMap<>();
 
     @Getter
-    private transient int orderCount = 0;
+    private int orderCount = 0;
 
     private final OrderMatcher LIMIT_MATCHER = new LimitOrderMatcher(this);
     private final OrderMatcher LIMIT_IOC_MATCHER = new LimitIocOrderMatcher(this);
@@ -60,57 +51,21 @@ public final class OrderBook {
     private final OrderMatcher MARKET_MATCHER = new MarketOrderMatcher(this);
     private final OrderMatcher LIMIT_MAKER_MATCHER = new LimitMakerOrderMatcher(this);
 
-
-    @Setter
-    @Getter
-    private long reqOffset;
-
-    @Getter
-    private volatile long masterReqOffset;
-
-    @Setter
-    @Getter
-    private transient long comparedFileOffset;
-
-    @Setter
-    @Getter
-    private transient long comparedFileQueueStartIndex = -1L;
-
-    @Getter
-    @Setter
-    private transient long snapshotOffset;
-
     private static final int DUPLICATE_ID_WINDOW_SIZE = 4;
     private static final int DUPLICATE_ID_WINDOW_INTERVAL_MILLIS = 1000 * 60 * 15;
-    private final transient OrderIdDeduplicate orderIdDeduplicate;
+    private final OrderIdDeduplicate orderIdDeduplicate;
     private final ArrayStackBookOrder arrayStackBookOrder;
 
     public OrderBook(String symbol, MarketConfig marketConfig, ArrayStackBookOrder arrayStackBookOrder) {
         if (StringUtils.isEmpty(symbol) || marketConfig == null) {
-            throw new IllegalArgumentException("symbol is empty");
+            throw new IllegalArgumentException("symbol and marketConfig must not be null");
         }
         this.symbol = symbol;
         this.marketConfig = marketConfig;
-        this.matchResultTopic = "match_result_" + symbol;
-        orderIdDeduplicate = new OrderIdDeduplicate(DUPLICATE_ID_WINDOW_SIZE, DUPLICATE_ID_WINDOW_INTERVAL_MILLIS);
+        this.orderIdDeduplicate = new OrderIdDeduplicate(DUPLICATE_ID_WINDOW_SIZE, DUPLICATE_ID_WINDOW_INTERVAL_MILLIS);
         this.arrayStackBookOrder = arrayStackBookOrder;
     }
 
-    /**
-     * 从快照元数据恢复规则
-     */
-    public void loadFromSnapshot(SnapshotLoadResult snapshotLoadResult, long configVersion) throws Exception {
-        if (snapshotLoadResult.snapshotMetadata().getMarketConfig() != null) {
-            this.marketConfig = snapshotLoadResult.snapshotMetadata().getMarketConfig();
-        }
-        SnapshotMetadata snapshotMetadata = snapshotLoadResult.snapshotMetadata();
-        orderIdDeduplicate.loadFromSnapshot(snapshotMetadata.getNavigable(), symbol);
-        this.appliedMarketConfigVersion = configVersion;
-    }
-
-    /**
-     * 应用通过 {@code UPDATE_MARKET} 校验后的新配置。
-     */
     public void applyMarketConfig(MarketConfig cfg, long configVersion) {
         this.marketConfig = cfg;
         this.appliedMarketConfigVersion = configVersion;
@@ -121,18 +76,18 @@ public final class OrderBook {
     }
 
     /**
-     * 相对候选规则仍不合规的存量挂单（含 priceScale 变更时全部挂单）。
+     * Resting orders that would become non-compliant under the candidate config.
      */
     public List<BookOrder> findNonCompliantOrders(MarketConfig candidate) {
         if (candidate == null) {
-            return List.of();
+            return Collections.emptyList();
         }
         List<BookOrder> all = new ArrayList<>(exportOrders());
         if (all.isEmpty()) {
-            return List.of();
+            return Collections.emptyList();
         }
         if (candidate.getPriceScale() != marketConfig.getPriceScale()) {
-            return List.copyOf(all);
+            return Collections.unmodifiableList(new ArrayList<>(all));
         }
         List<BookOrder> nonCompliant = new ArrayList<>();
         for (BookOrder eachOrder : all) {
@@ -143,111 +98,91 @@ public final class OrderBook {
         return nonCompliant;
     }
 
-
-    public void updateMasterReqOffsetIfGreater(long masterReqOffset) {
-        if (this.masterReqOffset < masterReqOffset) {
-            this.masterReqOffset = masterReqOffset;
-        }
-    }
-
-    /**
-     * 最低卖价刻度；无档位返回 null。
-     */
+    /** Lowest ask price tick; null if empty. */
     public Long firstAskPriceTicks() {
-        final long[] capturedPriceTick = new long[1];
-        final boolean[] foundFirst = new boolean[1];
+        final long[] captured = new long[1];
+        final boolean[] found = new boolean[1];
         sellSide.forEach((priceTicks, priceLevel) -> {
-            capturedPriceTick[0] = priceTicks;
-            foundFirst[0] = true;
+            captured[0] = priceTicks;
+            found[0] = true;
         }, 1);
-        return foundFirst[0] ? capturedPriceTick[0] : null;
+        return found[0] ? captured[0] : null;
     }
 
-    /**
-     * 最高买价刻度；无档位返回 null。
-     */
+    /** Highest bid price tick; null if empty. */
     public Long firstBidPriceTicks() {
-        final long[] capturedPriceTick = new long[1];
-        final boolean[] foundFirst = new boolean[1];
+        final long[] captured = new long[1];
+        final boolean[] found = new boolean[1];
         buySide.forEachDesc((priceTicks, priceLevel) -> {
-            capturedPriceTick[0] = priceTicks;
-            foundFirst[0] = true;
+            captured[0] = priceTicks;
+            found[0] = true;
         }, 1);
-        return foundFirst[0] ? capturedPriceTick[0] : null;
+        return found[0] ? captured[0] : null;
     }
 
-    public PriceLevel levelAtAsk(long priceTicks) {
-        return sellSide.get(priceTicks);
-    }
+    public PriceLevel levelAtAsk(long priceTicks) { return sellSide.get(priceTicks); }
+    public PriceLevel levelAtBid(long priceTicks) { return buySide.get(priceTicks); }
 
-    public PriceLevel levelAtBid(long priceTicks) {
-        return buySide.get(priceTicks);
-    }
-
-    /**
-     * 严格高于 {@code priceTicks} 的下一卖价档位（用于吃单遍历）。
-     */
     public Long nextAskAfter(long priceTicks) {
-        PriceLevel higherAskLevel = sellSide.getHigherValue(priceTicks);
-        return higherAskLevel == null ? null : higherAskLevel.getPriceTicks();
+        PriceLevel higher = sellSide.getHigherValue(priceTicks);
+        return higher == null ? null : higher.getPriceTicks();
     }
 
-    /**
-     * 严格低于 {@code priceTicks} 的下一买价档位。
-     */
     public Long nextBidBelow(long priceTicks) {
-        PriceLevel lowerBidLevel = buySide.getLowerValue(priceTicks);
-        return lowerBidLevel == null ? null : lowerBidLevel.getPriceTicks();
+        PriceLevel lower = buySide.getLowerValue(priceTicks);
+        return lower == null ? null : lower.getPriceTicks();
     }
 
     public void removeAskLevelIfEmpty(long priceTicks) {
-        PriceLevel askLevel = sellSide.get(priceTicks);
-        if (askLevel != null && askLevel.isEmpty()) {
-            sellSide.remove(priceTicks);
-        }
+        PriceLevel level = sellSide.get(priceTicks);
+        if (level != null && level.isEmpty()) sellSide.remove(priceTicks);
     }
 
     public void removeBidLevelIfEmpty(long priceTicks) {
-        PriceLevel bidLevel = buySide.get(priceTicks);
-        if (bidLevel != null && bidLevel.isEmpty()) {
-            buySide.remove(priceTicks);
-        }
+        PriceLevel level = buySide.get(priceTicks);
+        if (level != null && level.isEmpty()) buySide.remove(priceTicks);
     }
 
-    public MatchResult pushOrder(OrderPayload payload, long orderReqOffset, long timestamp) {
+    /**
+     * Push a new order into the book. {@code seq} = matchSeq used as price-time priority key.
+     */
+    public MatchResult pushOrder(OrderPayload payload, long seq, long timestamp) {
+        BookOrder takerOrder = arrayStackBookOrder.pop().parse(payload, seq, marketConfig);
 
-        BookOrder takerOrder = arrayStackBookOrder.pop().parse(payload, orderReqOffset, marketConfig);
-
-        if ((timestamp - payload.getCreateTime()) > marketConfig.getMaxValidTime() || payload.getCreateTime() > timestamp) {
-            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.ORDER_EXPIRED)));
+        if ((timestamp - payload.getCreateTime()) > marketConfig.getMaxValidTime()
+                || payload.getCreateTime() > timestamp) {
+            MatchResult result = MatchResult.of(Collections.emptyList(),
+                    Collections.singletonList(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.ORDER_EXPIRED)));
             recycleBookOrder(takerOrder);
             return result;
         }
 
         if (takerOrder.getOrderId() <= 0) {
-            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_ORDER_ID)));
+            MatchResult result = MatchResult.of(Collections.emptyList(),
+                    Collections.singletonList(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_ORDER_ID)));
             recycleBookOrder(takerOrder);
             return result;
         }
 
         if (orderIdDeduplicate.isDuplicate(takerOrder.getOrderId(), ordersById, timestamp)) {
-            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.DUPLICATE_ORDER_ID)));
+            MatchResult result = MatchResult.of(Collections.emptyList(),
+                    Collections.singletonList(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.DUPLICATE_ORDER_ID)));
             recycleBookOrder(takerOrder);
             return result;
         }
 
         TimeInForce timeInForce = TimeInForce.fromWire(payload.getTimeInForce());
         if (isLimitOrder(payload.getPriceType()) && timeInForce == null) {
-            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(
-                    finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_TIME_IN_FORCE)
-            ));
+            MatchResult result = MatchResult.of(Collections.emptyList(),
+                    Collections.singletonList(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_TIME_IN_FORCE)));
             recycleBookOrder(takerOrder);
             return result;
         }
 
         OrderMatcher matcher = selectMatcher(payload.getPriceType(), timeInForce);
         if (matcher == null) {
-            MatchResult result = MatchResult.of(Collections.emptyList(), List.of(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_PRICE_TYPE)));
+            MatchResult result = MatchResult.of(Collections.emptyList(),
+                    Collections.singletonList(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.INVALID_PRICE_TYPE)));
             recycleBookOrder(takerOrder);
             return result;
         }
@@ -256,37 +191,12 @@ public final class OrderBook {
             recycleBookOrder(takerOrder);
             return invalid;
         }
-        MatchResult result = matcher.match(takerOrder, orderReqOffset);
+        MatchResult result = matcher.match(takerOrder, seq);
         BookOrder inBookOrder = ordersById.get(takerOrder.getOrderId());
         if (inBookOrder != takerOrder) {
             recycleBookOrder(takerOrder);
         }
         return result;
-    }
-
-    private OrderMatcher selectMatcher(String priceType, TimeInForce timeInForce) {
-        if (priceType == null) return null;
-        return switch (priceType.toUpperCase()) {
-            case "MARKET" -> MARKET_MATCHER;
-            case "LIMIT_MAKER", "POST_ONLY" -> LIMIT_MAKER_MATCHER;
-            case "LIMIT" -> selectLimitMatcher(timeInForce);
-            default -> LIMIT_MATCHER;
-        };
-    }
-
-    private OrderMatcher selectLimitMatcher(TimeInForce timeInForce) {
-        if (timeInForce == null || timeInForce == TimeInForce.GTC) {
-            return LIMIT_MATCHER;
-        }
-        return switch (timeInForce) {
-            case IOC -> LIMIT_IOC_MATCHER;
-            case FOK -> LIMIT_FOK_MATCHER;
-            default -> LIMIT_MATCHER;
-        };
-    }
-
-    private boolean isLimitOrder(String priceType) {
-        return StringUtils.equalsIgnoreCase(priceType, "LIMIT");
     }
 
     public MatchResult cancelOrder(Long orderId) {
@@ -296,17 +206,11 @@ public final class OrderBook {
         }
         removeRestingOrder(order);
         FinishOrder fo = MatchSupport.finishOrder(order, FinishStatus.CANCEL, order.getRemainingVolume());
-        return MatchResult.of(Collections.emptyList(), List.of(fo));
+        return MatchResult.of(Collections.emptyList(), Collections.singletonList(fo));
     }
 
-    /**
-     * 从 id 索引与价位 FIFO 中移除已在簿上的订单，并维护 {@link #orderCount}。
-     * 用于撤单、maker 完全成交等路径；与 {@link #addToBook(BookOrder)} 成对。
-     */
     public void removeRestingOrder(BookOrder order) {
-        if (ordersById.get(order.getOrderId()) == null) {
-            return;
-        }
+        if (ordersById.get(order.getOrderId()) == null) return;
         ordersById.remove(order.getOrderId());
         orderCount--;
         removeFromBook(order);
@@ -332,42 +236,70 @@ public final class OrderBook {
         PriceLevel level = levelMap.get(ticks);
         if (level != null) {
             level.remove(order.getSeq());
-            if (level.isEmpty()) {
-                levelMap.remove(ticks);
-            }
+            if (level.isEmpty()) levelMap.remove(ticks);
         }
     }
 
     public Collection<BookOrder> exportOrders() {
-        return ordersById.entriesList().stream().map(Map.Entry::getValue).toList();
+        return ordersById.entriesList().stream().map(Map.Entry::getValue).collect(Collectors.toList());
     }
 
-    /**
-     * 按订单 ID 树遍历当前簿内挂单（单线程语义下使用）；用于快照写盘等场景，避免 {@link #exportOrders()} 分配整表集合。
-     */
+    /** Visit all resting orders without allocating a full list; used for snapshot writing. */
     public void visitBookOrder(LongObjConsumer<BookOrder> consumer) {
         ordersById.forEach(consumer, Integer.MAX_VALUE);
     }
 
-    public ArrayDeque<Roaring64NavigableMapWrapper> getNavigableMapWrappers() {
-        return orderIdDeduplicate.recentOrderIdWindows();
-    }
-
-    public void restoreOrder(long orderId, long uid, int shardId, String side, BigDecimal price, BigDecimal remainingVolume, long seq) {
+    /**
+     * Restore a single resting order during snapshot load.
+     * Called by {@code MatchClusteredService.onLoadSnapshot()}.
+     */
+    public void restoreOrder(long orderId, long uid, int shardId, String side,
+                             BigDecimal price, BigDecimal remainingVolume, long seq) {
         long ticks = PriceCodec.encode(price, marketConfig.getPriceScale());
         BookOrder order = new BookOrder(orderId, uid, shardId, side, price, ticks, remainingVolume, seq);
         addToBook(order);
     }
 
+    public void recycleBookOrder(BookOrder order) {
+        if (order != null) arrayStackBookOrder.add(order);
+    }
+
+    private OrderMatcher selectMatcher(String priceType, TimeInForce timeInForce) {
+        if (priceType == null) {
+            return null;
+        }
+        switch (priceType.toUpperCase()) {
+            case "MARKET":
+                return MARKET_MATCHER;
+            case "LIMIT_MAKER":
+            case "POST_ONLY":
+                return LIMIT_MAKER_MATCHER;
+            case "LIMIT":
+                return selectLimitMatcher(timeInForce);
+            default:
+                return LIMIT_MATCHER;
+        }
+    }
+
+    private OrderMatcher selectLimitMatcher(TimeInForce timeInForce) {
+        if (timeInForce == null || timeInForce == TimeInForce.GTC) {
+            return LIMIT_MATCHER;
+        }
+        switch (timeInForce) {
+            case IOC:
+                return LIMIT_IOC_MATCHER;
+            case FOK:
+                return LIMIT_FOK_MATCHER;
+            default:
+                return LIMIT_MATCHER;
+        }
+    }
+
+    private boolean isLimitOrder(String priceType) {
+        return StringUtils.equalsIgnoreCase(priceType, "LIMIT");
+    }
+
     private static MatchResult emptyResult() {
         return MatchResult.of(Collections.emptyList(), Collections.emptyList());
     }
-
-    public void recycleBookOrder(BookOrder order) {
-        if (order == null) {
-            return;
-        }
-        arrayStackBookOrder.add(order);
-    }
-
 }
