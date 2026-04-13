@@ -42,10 +42,11 @@ open-api (REST)
     │                              ▲
     │ 用户请求                      │ response 流 (MDC)
     ▼                              │
-trading-server shard N (结果共识, 三层架构)
+trading-server shard N (Spring Boot + Aeron Cluster, 结果共识)
     │  内存层: 全量 account → RingBuffer 分区
     │  共识层: Raft log (全节点处理 → 更新内存 + 输出三条流)
-    │  输出层: matchOrderReq / response / tradingResult
+    │  输出层: 双 MediaDriver, 全节点 MDC + Spy → Archive-2
+    │    matchOrderReq / response / tradingResult
     │
     │  matchReplayMerge             ▲ MatchResult MDC
     │  (Leader 独立线程              │ (Leader ReplayMerge)
@@ -53,9 +54,9 @@ trading-server shard N (结果共识, 三层架构)
     │   Aeron Cluster Client)       │
     ▼                              │
 match-engine Cluster (指令共识, 单线程, 严格 1:1)
+    │  双 MediaDriver: Cluster(Archive-1) + MDC(Archive-2)
     │  所有节点执行相同命令, 维护相同 OrderBook
-    │
-    │  MDC Publication (SBE) + Spy → Archive
+    │  全节点 MDC Publication (SBE) + Spy → Archive-2
     ▼
 ┌──────────────────────────────────────┐
 │  trading-server Leader (ReplayMerge)  │ → 结算
@@ -73,7 +74,7 @@ match-engine 部署为 **Aeron Cluster（3 节点）**，使用 **Raft 共识**�
 
 - **输入**：trading-server 各 shard 的 Leader 作为 Aeron Cluster client，通过 session 发送 `PushOrderCommand` / `CancelOrderCommand` / `UpdateMarketCommand`（SBE 编码）。
 - **输出**：撮合结果 `MatchResult` 通过 **Aeron MDC** 多播给所有消费者（trading-server、行情 service）。
-- **录制**：所有节点将结果写入本地 IPC publication，由 **Aeron Archive** 通过 **spy subscription** 零拷贝录制。
+- **录制**：所有节点通过 MDC publication 发布结果，由独立的 **MDC Archive（Archive-2）** 通过 **spy subscription** 零拷贝录制。Cluster MediaDriver 与 MDC MediaDriver 完全隔离。
 - **快照**：Aeron Cluster 内置 `onTakeSnapshot` / `onLoadSnapshot`，SBE 编码。
 
 ### 2.2 单线程撮合
@@ -106,9 +107,8 @@ match-engine 部署为 **Aeron Cluster（3 节点）**，使用 **Raft 共识**�
   │      result.matchSeq = nextMatchSeq                          │
   │                                                              │
   │      if (nextMatchSeq > lastRecordedMatchSeq):               │
-  │          localPub.offer(encode(result))  // 全节点 → spy      │
-  │          if (role == LEADER):                                │
-  │              mdcPub.offer(encode(result))// Leader → 网络    │
+  │          mdcPub.offer(encode(result))  // 全节点 → MDC       │
+  │          // spy 零拷贝录制到 Archive-2 (自动)                  │
   │      nextMatchSeq++                                          │
   │                                                              │
   │  engines:                                                    │
@@ -118,7 +118,7 @@ match-engine 部署为 **Aeron Cluster（3 节点）**，使用 **Raft 共识**�
   └──────────────────────────────────────────────────────────────┘
                  │
                  ▼
-  MDC Publication (Dynamic) + Spy → Archive
+  MDC Publication (Dynamic) + Spy → Archive-2
 ```
 
 ### 2.3 严格 1:1 输入输出 + matchSeq
@@ -135,20 +135,33 @@ match-engine 部署为 **Aeron Cluster（3 节点）**，使用 **Raft 共识**�
 - force=false 且存在不合规挂单 → 拒绝应用，空 MatchResult。
 - force=true 且触发撤单 → MatchResult 包含被强制撤销的 finishOrders。
 
-### 2.4 MDC 出口与 Spy 录制
+### 2.4 双 MediaDriver + 双 Archive + MDC 出口
 
-- **MDC (Multi-Destination-Cast)**：Leader 通过 Dynamic MDC 发布 MatchResult。消费者（trading-server、行情）自行连接 control endpoint，match-engine 不感知消费者拓扑。
+每个 Cluster 节点运行两个**完全隔离**的 MediaDriver，各自挂载独立 Archive：
+
+```
+  ┌──────────────────────────────┐    ┌──────────────────────────────────┐
+  │  Cluster MediaDriver         │    │  MDC MediaDriver                 │
+  │  (Consensus / Archive-1)     │    │  (MatchResult 发布 / Archive-2)  │
+  │                              │    │                                  │
+  │  Archive-1: 共识日志 / 快照  │    │  ExclusivePublication (MDC)      │
+  │  ConsensusModule             │    │       │                          │
+  │  ClusteredServiceContainer   │    │  aeron-spy: + LOCAL              │
+  │                              │    │       ▼                          │
+  │  互不关联 ──────────────────┼────┼── Archive-2: spy 录制撮合结果    │
+  └──────────────────────────────┘    └──────────────────────────────────┘
+```
+
+- **MDC (Multi-Destination-Cast)**：所有节点将 MatchResult offer 到 MDC publication（UDP Dynamic MDC），消费者自行连接 control endpoint，match-engine 不感知消费者拓扑。
   - Channel 示例：`aeron:udp?control=0.0.0.0:40000|control-mode=dynamic`
-- **双 publication 模型**：
-  - `localPub` (IPC)：所有节点 offer，供本地 Archive spy 录制。
-  - `mdcPub` (UDP MDC)：仅 Leader offer，网络发送给订阅者。
-- **Spy subscription**：`aeron-spy:aeron:ipc` — 从 driver send buffer 直接读取，零拷贝，与撮合线程零耦合。
+- **Spy 录制**：MDC Archive（Archive-2）通过 `aeron-spy:` + `SourceLocation.LOCAL` 从同 driver 的 publication log buffer 零拷贝录制，不走网络，与撮合线程零耦合。
+- **双 MediaDriver 隔离**：集群共识与撮合结果输出互不干扰，任一侧故障不影响另一侧。
 - **扩展录制 (extend recording)**：使用 `AeronArchive.extendRecording()` 确保 `recordingId` 在重启后保持不变，消费者可用固定 recordingId 发起 ReplayMerge。
-- **Archive 一致性**：所有节点处理相同命令 → 确定性相同结果 → 所有节点的 Archive 内容一致。切主时新 Leader 的 Archive 已有完整历史。
+- **Archive 一致性**：所有节点处理相同命令 → 确定性相同结果 → 所有节点的 Archive-2 内容一致。切主时新 Leader 的 Archive 已有完整历史。
 - **启动去重**：
-  - 启动时若已有 Archive 录制，先本地 replay 找到 `lastRecordedMatchSeq`。
-  - Cluster 回放 Raft log 期间，matchSeq ≤ lastRecordedMatchSeq 的 MatchResult 跳过写入 Archive，避免重复。
-- **matchSeq → Archive position 索引**：内部维护 `TreeMap<Long, Long>`（matchSeq → archive position），启动时 replay 重建，运行时动态更新。消费者可通过 matchSeq 查询对应 archive position 发起 ReplayMerge。
+  - 启动时若已有 Archive-2 录制，先本地 replay 找到 `lastRecordedMatchSeq`。
+  - Cluster 回放 Raft log 期间，matchSeq ≤ lastRecordedMatchSeq 的 MatchResult 跳过写入，避免重复。
+- **matchSeq → Archive position 索引**：内部维护 `TreeMap<Long, Long>`（matchSeq → archive position），启动时从 Archive-2 replay 重建，运行时动态更新。消费者可通过 matchSeq 查询对应 archive position 发起 ReplayMerge。
 
 ### 2.5 消费者通过 ReplayMerge 订阅
 
@@ -162,7 +175,7 @@ trading-server 和行情 service 通过 Aeron Archive 的 **ReplayMerge** 消费
    - **Live 阶段**：直接消费 MDC 实时数据。
 4. 消费者始终使用同一个 `replayMerge.poll(handler, fragmentLimit)` 接口，无需区分阶段。
 5. 消费者用 matchSeq 做间隙检测：收到 matchSeq N 后下一条必须是 N+1，否则告警。
-6. match-engine 切主时：消费者检测 live MDC 中断 → 重建 ReplayMerge，连接新 Leader 的 Archive → 用 matchSeq 去重继续消费，无数据丢失。
+6. match-engine 切主时：消费者检测 live MDC 中断 → 重建 ReplayMerge，连接新 Leader 的 Archive-2 → 用 matchSeq 去重继续消费，无数据丢失。
 
 ### 2.6 Cluster 快照
 
@@ -176,7 +189,7 @@ OrderBook 快照由 Aeron Cluster 内置机制管理：
 
 - **选主**：完全依靠 Aeron Cluster 内置 Raft 共识，不依赖 ZooKeeper。
 - **指令共识**：所有节点处理相同命令，维护相同状态。切主无需补发、无数据丢失。
-- **Archive 连续性**：所有节点维护完整的本地 Archive，切主后消费者连接新 Leader 即可。
+- **Archive 连续性**：所有节点维护完整的本地 Archive-2（MDC 侧），切主后消费者连接新 Leader 即可。
 
 ---
 
@@ -267,8 +280,14 @@ OrderBook 快照由 Aeron Cluster 内置机制管理：
 
 ### 4.1 概述
 
-trading-server 采用**结果共识**，架构分为三层：**内存层**、**共识层**、**输出层**。
+trading-server 采用**结果共识**，架构分为三层：**内存层**、**共识层**、**输出层**。保留 **Spring Boot** 框架。
 
+- **保留 Spring Boot**：
+  - REST API 接口（open-api 接入 NEW_ORDER / CANCEL_ORDER 请求）。
+  - `@ConfigurationProperties` 管理 Aeron Cluster、MDC、RingBuffer 等配置。
+  - `SmartLifecycle` 管理 Aeron Cluster 节点的启动 / 关闭生命周期。
+  - Spring DI 组装 ClusteredService 实现、Egress 组件、REST Controller。
+  - Aeron Cluster 作为 Spring 容器内的 `SmartLifecycle` bean 运行，不替代 Spring 本身。
 - **为什么不用指令共识**：trading-server 处理 NEW_ORDER 时有外部副作用（发 order_req 给 match-engine、发 response 给 open-api、写 trading_result 给 flush-service）。如果所有副本都执行命令，会产生重复副作用。
 - **结果共识**：只有 Leader 接收外部请求并处理。内存层与共识层数据隔离，Leader 处理时不查询共识层。Follower 通过共识层同步数据到内存层。
 
@@ -388,44 +407,52 @@ trading-server 采用**结果共识**，架构分为三层：**内存层**、**�
 
 ### 4.4 切主流程
 
-```
-  切主流程
-  ═══════════════════════════════════════════════════════════════
+三种切主场景共享相同的状态重建路径：`onTerminate` → `onStart`（加载快照 + 回放 Raft log）→ 共识层**全量覆盖**内存层。
 
-  旧 Leader 失败
-      │
-      ▼
+**切主场景**：
+
+| 场景 | 触发条件 | 旧 Leader 行为 | 新 Leader 行为 |
+|------|----------|----------------|----------------|
+| Leader 处理慢被强制切主 | 心跳超时 / Cluster 判定 | `onRoleChange(FOLLOWER)` → `onTerminate` → 服务重启 | `onStart` → 从快照 + log 重建 |
+| Leader 进程崩溃 | 进程退出 | 无（已崩溃） | 同上 |
+| Leader 没宕机，主动让出 | 运维触发 / Cluster 重配置 | `onRoleChange(FOLLOWER)` → `onTerminate` → 重启并全量从共识层覆盖内存层 | 同上 |
+
+**新 Leader 状态重建**：
+
+```
   新 Leader 当选
       │
       ▼
-  新 Leader 向共识层推送切主消息 (LeaderChange)
+  onStart(cluster, snapshotImage)
       │
-      ▼
-  切主消息通过 Raft log 提交
+      ├── loadSnapshot: 从快照重建全量 TradingAccount
+      │   + ringBufferMatchSeq[0..N-1]
+      │   + ringBufferCount
       │
-      ▼
-  收到切主消息 → 确认所有待处理的共识数据已处理完毕
+      ├── 回放后续 Raft log (自动)
+      │   → onSessionMessage 逐条应用 delta
+      │   → 共识层 TradingAccount 逐步追赶到最新
       │
-      ▼
-  从共识层获取所有 RingBuffer 的 matchSeq
+      ├── 共识层数据 → 全量覆盖内存层
+      │   (所有 RingBuffer 的 TradingAccount 从共识层拷贝)
       │
-      ├─ ringBufferMatchSeq[0] = 150
-      ├─ ringBufferMatchSeq[1] = 148   ← min
-      ├─ ringBufferMatchSeq[2] = 152
-      └─ ...
+      ├── 推送 LeaderChange 消息进入 Raft log
+      │   → 确认之前所有条目已被处理
       │
-      ▼
-  取 min(ringBufferMatchSeq) = 148
+      ├── 恢复 matchReplayMerge:
+      │   min(ringBufferMatchSeq) → 消费起点
+      │   从该 matchSeq 开始 ReplayMerge 消费 MatchResult
+      │       matchSeq ≤ 某 RingBuffer 已处理位点 → 跳过
+      │       matchSeq > 某 RingBuffer 已处理位点 → 正常处理
       │
-      ▼
-  从 matchSeq=148 开始消费 MatchResult (ReplayMerge)
-      │
-      │ · matchSeq ≤ 各 RingBuffer 已处理位点 → 该 RingBuffer 跳过
-      │ · matchSeq > RingBuffer 已处理位点 → 正常处理
-      │ · 确保不丢失任何 RingBuffer 尚未处理的 MatchResult
-      ▼
-  正常服务
+      └── 开始接收 REST 请求
 ```
+
+**旧 Leader 降级**（非崩溃场景）：
+
+1. `onTerminate` → 停止 REST 请求接收、停止 matchReplayMerge、停止消费 MatchResult。
+2. `onStart` 重新加载快照 + 回放 log → 共识层数据**全量覆盖**内存层（清除内存层可能存在的脏数据）。
+3. 以 Follower 角色运行：Raft log → 共识层更新 → 覆盖内存层 + 输出三条流。
 
 **切主消息的作用**：
 - 新 Leader 当选后，首先向共识层推送一条 **切主消息**（LeaderChange）。
@@ -437,27 +464,37 @@ trading-server 采用**结果共识**，架构分为三层：**内存层**、**�
 - 取所有 RingBuffer 的 `min(matchSeq)` 作为消费起点，确保不丢失任何 RingBuffer 尚未处理的数据。
 - 已处理过的 MatchResult 在对应 RingBuffer 中通过 matchSeq 比较跳过，不会重复结算。
 
-```
-  Leader 独有:
-  ═══════════════════════════════════════════════════════════════
+### 4.5 输出层：三条 MDC 流 + 双 MediaDriver
 
-  matchReplayMerge 线程:
-    本地 matchOrderReq Archive → Aeron Cluster Client → match-engine
-```
-
-### 4.5 输出层：三条 MDC 流
-
-输出层分为三条独立的流，**全节点**在处理 Raft log 时输出。
+输出层采用与 match-engine 相同的**双 MediaDriver + 双 Archive** 架构（见 §2.4），分为三条独立的流。**全节点**在处理 Raft log 提交时输出。
 
 | 流 | 内容 | 消费者 | 用途 |
 |-----|------|--------|------|
-| **matchOrderReq** | PushOrderCommand / CancelOrderCommand | match-engine | 撮合指令（通过 matchReplayMerge 转发） |
-| **response** | 订单响应（接受/拒绝/状态更新） | open-api | 响应用户请求 |
-| **tradingResult** | 结算结果（账户变更、订单更新、成交记录） | flush-service | 持久化到 MySQL |
+| **matchOrderReq** | PushOrderCommand / CancelOrderCommand | matchReplayMerge → match-engine | 撮合指令 |
+| **response** | 订单响应（接受 / 拒绝 / 状态更新） | open-api | 响应用户请求 |
+| **tradingResult** | 结算结果（账户变更、订单更新、成交记录） | flush-service → MySQL | 持久化 |
 
-每条流的架构（与 match-engine 相同模式）：
-- `localPub` (IPC)：全节点 offer，Spy → 本地 Archive 录制。
-- `mdcPub` (UDP MDC, Dynamic)：仅 Leader offer，网络发送给消费者。
+每条流的架构：
+
+```
+  共识层 onSessionMessage
+      │
+      ▼ encode + offer
+  ┌──────────────────────────────────────────────────┐
+  │  MDC MediaDriver (与 Cluster MediaDriver 完全隔离) │
+  │                                                  │
+  │  ExclusivePublication (UDP MDC Dynamic)           │
+  │      │                                           │
+  │  aeron-spy: + SourceLocation.LOCAL                │
+  │      ▼                                           │
+  │  MDC Archive (Archive-2): spy 录制到本地          │
+  └──────────────────────────────────────────────────┘
+      │ (MDC 网络)
+      ▼
+  下游消费者 (ReplayMerge 订阅)
+```
+
+- 全节点 offer 到 MDC publication，spy 录制到本地 Archive-2。
 - 扩展录制（extend recording）：确保 recordingId 跨重启稳定。
 - 全节点 Archive 内容一致（因为都处理相同的 Raft log → 确定性相同的输出），切主后消费者可连接新 Leader 的 Archive。
 
@@ -537,6 +574,34 @@ Leader 启动独立的 **matchReplayMerge 线程**，负责将 matchOrderReq 流
 - 每个 RingBuffer 处理完毕后，将该 RingBuffer 的 matchSeq 位点随变更一起提交到共识层。
 - Follower 不消费 MatchResult，其内存层数据通过 Raft log 同步。
 - 切主后新 Leader 从 `min(ringBufferMatchSeq)` 开始消费，各 RingBuffer 通过 matchSeq 比较跳过已处理的数据（详见 §4.4）。
+
+### 4.10 快照格式
+
+trading-server 的 Aeron Cluster 快照需持久化以下状态：
+
+| 消息 | 内容 | 说明 |
+|------|------|------|
+| TradingSnapshotHeader | `ringBufferCount`, `accountCount` | 快照头 |
+| TradingAccountSnapshot | `uid`, 余额 / 冻结 / 持仓等全量字段 | 每个账户一条 |
+| RingBufferMatchSeqSnapshot | `ringBufferIndex`, `matchSeq` | 每个 RingBuffer 的 matchSeq 位点 |
+
+快照由 Aeron Cluster 内置机制管理（`onTakeSnapshot` / `onLoadSnapshot`），采用 SBE 编码。
+
+### 4.11 组件迁移映射
+
+| 现有组件 (Kafka 架构) | 命运 | 新组件 / 替代方案 |
+|------------------------|------|---------------------|
+| `KafkaConsumer` (trading_{shard}) | 删除 | Aeron Cluster `onSessionMessage` |
+| `KafkaProducer` (trading_result) | 删除 | tradingResult MDC + Archive |
+| `KafkaProducer` (RESPONSE) | 删除 | response MDC + Archive |
+| `Disruptor` / 4-slot 并行 | 删除 | RingBuffer[N] 分区 |
+| `TradingLeaderElectionService` (ZK) | 删除 | Aeron Cluster 内置 Raft 选主 |
+| `TradingResultSlaveFileQueue` (Chronicle) | 删除 | 全节点 Raft log + Archive |
+| `TradingResultTailQueryService` | 删除 | matchSeq 位点 + ReplayMerge |
+| `SettlementEventHandler` | 重构 | ClusteredService 的 `onSessionMessage` 处理 |
+| `SlotContext` / `TradingAccount` | 保留 | 内存层 + 共识层各持有独立副本 |
+| `CommandRouter` / Handler | 重构 | REST Controller → RingBuffer → Raft log |
+| Spring Boot / REST | **保留** | 继续作为 open-api 接入层 |
 
 ---
 
@@ -663,56 +728,63 @@ trading-server 结算后将变更输出到 flush-service 落库。需持久化�
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                            AERON EXCHANGE                                │
-│                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 
   open-api (REST/JSON)
       │                              ▲
-      │ 用户请求                      │ response 流 (MDC, ReplayMerge)
+      │ 用户请求                      │ response 流 (MDC ReplayMerge)
       ▼                              │
-  ╔════════════════════════════════════════════════════════════════════╗
-  ║  trading-server shard N  (结果共识, 三层架构)                        ║
-  ║                                                                    ║
-  ║  内存层: 全量 account → RingBuffer[0..N] (按 uid hash 分区)         ║
-  ║  共识层: Raft log (全节点处理 → 更新内存层 + 输出三条流)             ║
-  ║  输出层: 全节点本地 Archive, Leader 额外 MDC 网络发送                ║
-  ║    · matchOrderReq  → match-engine  (撮合指令)                      ║
-  ║    · response        → open-api      (用户响应)                      ║
-  ║    · tradingResult   → flush-service  (持久化)                       ║
-  ║                                                                    ║
-  ║  matchReplayMerge (Leader 独立线程, 不反压共识)                      ║
-  ║    本地 matchOrderReq Archive → Aeron Cluster Client → 撮合        ║
-  ║                                                                    ║
-  ╚═══════════┬════════════════════════════════════════════════════════╝
-              │                                 ▲
-              │ matchReplayMerge               │ MatchResult MDC
-              │ (Aeron Cluster Client)         │ (Leader ReplayMerge)
-              ▼                                 │
-  ┌────────────────────────────────────────────┴───────────────────────┐
-  │  match-engine Cluster  (3 nodes, Raft 指令共识)                      │
-  │                                                                    │
-  │  Raft Log → onSessionMessage (单线程, 严格 1:1)                     │
-  │    → engines.get(symbolId).process(cmd)                            │
-  │    → MatchResult (matchSeq 全局递增)                                │
-  │                                                                    │
-  │  Egress:                                                           │
-  │    localPub (IPC, 全节点) → Spy → Archive (本地录制)                 │
-  │    mdcPub (UDP MDC, Leader only) → 网络多播                         │
-  └────────────────────────────────────────────────────────────────────┘
-              │
-              │ MatchResult MDC (Dynamic control-mode, SBE)
-              │
-      ┌───────┼────────────────────────┐
-      ▼       ▼                        ▼
-  trading   trading                ┌─────────┐
-  server    server                │  行情     │
-  shard 0   shard 1  ...         │ service  │
-  (Leader                        │(ReplayMerge)
-   ReplayMerge)                  └─────────┘
-      │
-      │ tradingResult 流
-      │ (MDC, ReplayMerge)
-      ▼
+  ╔════════════════════════════════════════════════════════════════════════╗
+  ║  trading-server shard N  (Spring Boot + Aeron Cluster, 结果共识)       ║
+  ║                                                                      ║
+  ║  ┌────────────────────────────────────────────────────────────────┐   ║
+  ║  │  内存层: 全量 account → RingBuffer[0..N] (按 uid hash 分区)    │   ║
+  ║  │  Leader: REST 请求 + MatchResult → 校验/冻结/结算 → delta      │   ║
+  ║  │  Follower: 由共识层全量覆盖                                    │   ║
+  ║  └────────────────────────────────────────────────────────────────┘   ║
+  ║  ┌────────────────────────────────────────────────────────────────┐   ║
+  ║  │  共识层: Raft log (全节点处理 → 更新 TradingAccount + 输出)    │   ║
+  ║  │  切主: onTerminate → onStart(snapshot) → 共识层全量覆盖内存层  │   ║
+  ║  └────────────────────────────────────────────────────────────────┘   ║
+  ║  ┌────────────────────────────────────────────────────────────────┐   ║
+  ║  │  输出层 (双 MediaDriver, 全节点 MDC + Spy → Archive-2)         │   ║
+  ║  │    matchOrderReq  → match-engine  (撮合指令)                   │   ║
+  ║  │    response        → open-api      (用户响应)                   │   ║
+  ║  │    tradingResult   → flush-service  (持久化)                    │   ║
+  ║  └────────────────────────────────────────────────────────────────┘   ║
+  ║  matchReplayMerge (Leader 独立线程, 不反压共识)                       ║
+  ║    本地 matchOrderReq Archive → Aeron Cluster Client → 撮合         ║
+  ╚══════════════┬═══════════════════════════════════════════════════════╝
+                 │                                 ▲
+                 │ matchReplayMerge               │ MatchResult MDC
+                 │ (Aeron Cluster Client)         │ (Leader ReplayMerge)
+                 ▼                                 │
+  ┌──────────────────────────────────────────────┴───────────────────────┐
+  │  match-engine Cluster  (3 nodes, Raft 指令共识)                       │
+  │                                                                      │
+  │  ┌─────────────────────┐    ┌─────────────────────────────────┐      │
+  │  │  Cluster MediaDriver │    │  MDC MediaDriver                │      │
+  │  │  (Archive-1: 共识)   │    │  (Archive-2: spy 录制)          │      │
+  │  └─────────────────────┘    └─────────────────────────────────┘      │
+  │                                                                      │
+  │  Raft Log → onSessionMessage (单线程, 严格 1:1)                       │
+  │    → engines.get(symbolId).process(cmd)                              │
+  │    → MatchResult (matchSeq 全局递增)                                  │
+  │    → 全节点 MDC Publication + Spy → Archive-2                         │
+  └──────────────────────────────────────────────────────────────────────┘
+                 │
+                 │ MatchResult MDC (Dynamic control-mode, SBE)
+                 │
+         ┌───────┼────────────────────────┐
+         ▼       ▼                        ▼
+     trading   trading                ┌─────────┐
+     server    server                │  行情     │
+     shard 0   shard 1  ...         │ service  │
+     (Leader                        │(ReplayMerge)
+      ReplayMerge)                  └─────────┘
+         │
+         │ tradingResult 流 (MDC ReplayMerge)
+         ▼
   ┌────────────────────┐
   │  flush-service     │
   │  → MySQL           │
