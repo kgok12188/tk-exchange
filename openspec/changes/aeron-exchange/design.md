@@ -464,7 +464,7 @@ trading-server 处理 NEW_ORDER 时有外部副作用：
 ##### 12.4.2 状态重建流程
 
 ```
-  新 Leader 当选
+  新 Leader 当选 (onRoleChange → LEADER)
        │
        ▼
   onStart(cluster, snapshotImage)
@@ -480,8 +480,14 @@ trading-server 处理 NEW_ORDER 时有外部副作用：
        ├── 共识层数据 → 全量覆盖内存层
        │   (所有 RingBuffer 的 TradingAccount 从共识层拷贝)
        │
-       ├── 推送 LeaderChange 消息进入 Raft log
-       │   → 确认之前所有条目已被处理
+       ├── 推送 LeaderChange(memberId) 进入 Raft log
+       │   → 全节点处理此消息，记录 activeMemberId = memberId
+       │   → 此后只接受 activeMemberId 匹配的节点推送的 delta
+       │   → 其他节点的推送被拒绝（旧 Leader 的残留 delta 被丢弃）
+       │
+       ├── 本节点处理到 LeaderChange 且 memberId == 自身
+       │   → 切主确认完成
+       │   → 从共识层获取 ringBufferMatchSeq，确保完整一致
        │
        ├── 恢复 matchReplayMerge:
        │   min(ringBufferMatchSeq) → 消费起点
@@ -492,16 +498,44 @@ trading-server 处理 NEW_ORDER 时有外部副作用：
        └── 开始接收 REST 请求
 ```
 
+##### 12.4.3 LeaderChange 消息：隔离令牌
+
+`LeaderChange(memberId)` 不仅是"确认前序日志已处理"的标记，更是**隔离令牌（fencing token）**：
+
+- **写入 Raft log**：新 Leader 当选后，立即向共识层推送 `LeaderChange(memberId)` 消息，进入 Raft log。
+- **全节点记录**：所有节点（Leader + Follower）处理此消息时，记录 `activeMemberId = memberId`。
+- **拒绝非法推送**：此后共识层只接受 `activeMemberId` 匹配的节点推送的业务 delta。旧 Leader 残留的、尚未提交的 delta 因 memberId 不匹配而被拒绝，防止脏数据进入共识。
+- **切主确认**：当推送 LeaderChange 的节点自身处理到这条消息（`LeaderChange.memberId == 本节点 memberId`），说明：
+  1. 该消息之前的所有 Raft log 条目都已被共识层处理完毕。
+  2. 共识层的 `ringBufferMatchSeq` 是完整、一致的。
+  3. 切主正式完成，可以开始接收 REST 请求和消费 MatchResult。
+
+```
+  时间线:  旧 Leader (node-0)          新 Leader (node-1)
+  ───────────────────────────────────────────────────────────
+  t0       正常推送 delta
+  t1       心跳超时 / 崩溃
+  t2                                   当选 Leader
+  t3                                   推送 LeaderChange(memberId=1)
+  t4       (残留 delta 到达)
+           → 拒绝: activeMemberId=1    
+             != 发送方 memberId=0      全节点记录 activeMemberId=1
+  t5                                   自身处理到 LeaderChange
+                                       → 切主确认完成
+  t6                                   开始接收 REST + MatchResult
+```
+
 - **为什么取 `min(ringBufferMatchSeq)`**：不同 RingBuffer 处理不同用户的 MatchResult，各自进度可能不同。取最小值确保不丢失任何尚未处理的数据，已处理的通过 matchSeq 比较跳过。
 - **RingBuffer 数量不可变**：共识层记录 `ringBufferCount`，运行期间不允许变更，保证 Leader 和 Follower 的分区映射一致。
 
-##### 12.4.3 旧 Leader 降级
+##### 12.4.4 旧 Leader 降级
 
 旧 Leader（非崩溃场景）收到 `onRoleChange(FOLLOWER)` 后：
 
 1. `onTerminate` → 停止 REST 请求接收、停止 matchReplayMerge、停止消费 MatchResult。
 2. `onStart` 重新加载快照 + 回放 log → 共识层数据**全量覆盖**内存层（清除内存层可能存在的脏数据）。
 3. 以 Follower 角色运行：Raft log → 共识层更新 → 覆盖内存层 + 输出三条流。
+4. 旧 Leader 残留的未提交 delta 因 `activeMemberId` 不匹配而被共识层拒绝，不会污染状态。
 
 #### 12.5 matchReplayMerge：撮合指令转发
 

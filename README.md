@@ -420,7 +420,7 @@ trading-server 采用**结果共识**，架构分为三层：**内存层**、**�
 **新 Leader 状态重建**：
 
 ```
-  新 Leader 当选
+  新 Leader 当选 (onRoleChange → LEADER)
       │
       ▼
   onStart(cluster, snapshotImage)
@@ -436,8 +436,14 @@ trading-server 采用**结果共识**，架构分为三层：**内存层**、**�
       ├── 共识层数据 → 全量覆盖内存层
       │   (所有 RingBuffer 的 TradingAccount 从共识层拷贝)
       │
-      ├── 推送 LeaderChange 消息进入 Raft log
-      │   → 确认之前所有条目已被处理
+      ├── 推送 LeaderChange(memberId) 进入 Raft log
+      │   → 全节点记录 activeMemberId = memberId
+      │   → 此后只接受 activeMemberId 匹配的节点推送 delta
+      │   → 其他节点的推送被拒绝 (fencing)
+      │
+      ├── 本节点处理到 LeaderChange 且 memberId == 自身
+      │   → 切主确认完成
+      │   → 从共识层获取 ringBufferMatchSeq (完整一致)
       │
       ├── 恢复 matchReplayMerge:
       │   min(ringBufferMatchSeq) → 消费起点
@@ -453,11 +459,28 @@ trading-server 采用**结果共识**，架构分为三层：**内存层**、**�
 1. `onTerminate` → 停止 REST 请求接收、停止 matchReplayMerge、停止消费 MatchResult。
 2. `onStart` 重新加载快照 + 回放 log → 共识层数据**全量覆盖**内存层（清除内存层可能存在的脏数据）。
 3. 以 Follower 角色运行：Raft log → 共识层更新 → 覆盖内存层 + 输出三条流。
+4. 旧 Leader 残留的未提交 delta 因 `activeMemberId` 不匹配而被共识层拒绝，不会污染状态。
 
-**切主消息的作用**：
-- 新 Leader 当选后，首先向共识层推送一条 **切主消息**（LeaderChange）。
-- 切主消息通过 Raft log 提交后被处理，此时可以确认：Raft log 中排在切主消息之前的所有条目都已被共识层处理完毕。
-- 这保证了从共识层读取的 `ringBufferMatchSeq` 是完整、一致的。
+**LeaderChange(memberId) — 隔离令牌（fencing token）**：
+
+```
+  时间线:  旧 Leader (node-0)          新 Leader (node-1)
+  ───────────────────────────────────────────────────────────
+  t0       正常推送 delta
+  t1       心跳超时 / 崩溃
+  t2                                   当选 Leader
+  t3                                   推送 LeaderChange(memberId=1)
+  t4       (残留 delta 到达)
+           → 拒绝: activeMemberId=1
+             != 发送方 memberId=0      全节点记录 activeMemberId=1
+  t5                                   自身处理到 LeaderChange
+                                       → 切主确认完成
+  t6                                   开始接收 REST + MatchResult
+```
+
+- **写入 Raft log**：新 Leader 当选后立即推送 `LeaderChange(memberId)` 进入 Raft log。
+- **全节点记录**：所有节点处理此消息时记录 `activeMemberId = memberId`。此后共识层只接受 `activeMemberId` 匹配的节点推送的业务 delta，旧 Leader 残留数据被拒绝。
+- **切主确认**：当推送者自身处理到 `LeaderChange.memberId == 本节点`，说明之前所有 Raft log 条目都已处理完毕，`ringBufferMatchSeq` 完整一致，切主正式完成。
 
 **从最小 matchSeq 开始消费**：
 - 不同 RingBuffer 处理不同用户的 MatchResult，各自的 matchSeq 进度可能不同。
