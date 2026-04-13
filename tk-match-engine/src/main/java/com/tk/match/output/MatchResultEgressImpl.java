@@ -310,16 +310,42 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         if (aeronArchive == null) {
             throw new IllegalStateException("AeronArchive not connected");
         }
-        if (recordingId >= 0) {
-            aeronArchive.extendRecording(recordingId, spyChannel(),
-                    matchResultStreamId(), SourceLocation.LOCAL);
-            log.info("Extended spy recording: recordingId={}", recordingId);
-        } else {
-            aeronArchive.startRecording(spyChannel(),
-                    matchResultStreamId(), SourceLocation.LOCAL);
-            recordingId = waitForRecordingId();
-            log.info("Started spy recording: recordingId={}", recordingId);
+        if (recordingId >= 0 && matchResultPublication != null) {
+            int recordingInitTermId = queryRecordingInitialTermId(recordingId);
+            int publicationInitTermId = matchResultPublication.initialTermId();
+            if (recordingInitTermId == publicationInitTermId) {
+                aeronArchive.extendRecording(recordingId, spyChannel(),
+                        matchResultStreamId(), SourceLocation.LOCAL);
+                log.info("Extended spy recording: recordingId={}", recordingId);
+                return;
+            }
+            log.warn("initialTermId mismatch: recording={} publication={}; "
+                    + "purging old recording and starting fresh",
+                    recordingInitTermId, publicationInitTermId);
+            purgeRecording();
         }
+        aeronArchive.startRecording(spyChannel(),
+                matchResultStreamId(), SourceLocation.LOCAL);
+        recordingId = waitForRecordingId();
+        log.info("Started spy recording: recordingId={}", recordingId);
+    }
+
+    private int queryRecordingInitialTermId(long targetRecordingId) {
+        int[] termIdHolder = new int[]{0};
+        boolean[] foundHolder = new boolean[]{false};
+        aeronArchive.listRecording(targetRecordingId,
+                (controlSessionId, correlationId, recId, startTimestamp, stopTimestamp,
+                 startPosition, stopPosition, initialTermId, segmentFileLength,
+                 termBufferLength, mtuLength, sessionId, streamId,
+                 strippedChannel, originalChannel, sourceIdentity) -> {
+                    termIdHolder[0] = initialTermId;
+                    foundHolder[0] = true;
+                });
+        if (!foundHolder[0]) {
+            log.warn("Recording {} not found in Archive", targetRecordingId);
+            return Integer.MIN_VALUE;
+        }
+        return termIdHolder[0];
     }
 
     private long findExistingRecording(AeronArchive archive) {
