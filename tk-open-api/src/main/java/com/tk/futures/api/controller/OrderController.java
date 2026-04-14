@@ -5,10 +5,10 @@ import com.alibaba.fastjson2.JSONObject;
 import com.tk.futures.api.async.AsyncService;
 import com.tk.futures.api.interceptor.LoginInterceptor;
 import com.tk.protocol.dto.TradingRequest;
-import com.tx.common.entity.MatchMarketConfig;
+import com.tx.common.entity.MarketConfig;
 import com.tx.common.entity.Order;
 import com.tx.common.entity.User;
-import com.tx.common.service.MatchMarketConfigService;
+import com.tx.common.service.MarketConfigService;
 import com.tx.common.vo.R;
 import io.swagger.annotations.ApiOperation;
 import jakarta.servlet.AsyncContext;
@@ -32,9 +32,9 @@ import java.util.Date;
 public class OrderController {
 
     private final AsyncService asyncService;
-    private final MatchMarketConfigService marketConfigService;
+    private final MarketConfigService marketConfigService;
 
-    public OrderController(AsyncService asyncService, MatchMarketConfigService marketConfigService) {
+    public OrderController(AsyncService asyncService, MarketConfigService marketConfigService) {
         this.asyncService = asyncService;
         this.marketConfigService = marketConfigService;
     }
@@ -103,7 +103,7 @@ public class OrderController {
                 return deferredResult;
             }
         }
-        MatchMarketConfig marketConfig = marketConfigService.getById(order.getMarketId());
+        MarketConfig marketConfig = marketConfigService.getById(order.getMarketId());
         TradingRequest request = TradingRequest.builder()
                 .command("NEW_ORDER")
                 .uid(order.getUid())
