@@ -3,7 +3,7 @@ package com.tk.match.engine;
 import com.tk.protocol.dto.CommandType;
 import com.tk.protocol.dto.FinishOrder;
 import com.tk.protocol.dto.FinishStatus;
-import com.tk.protocol.dto.MarketConfig;
+import com.tk.protocol.dto.MatchMarketConfig;
 import com.tk.protocol.dto.MatchResponse;
 import com.tk.protocol.dto.OrderCommand;
 import com.tk.protocol.dto.OrderPayload;
@@ -213,8 +213,9 @@ class MatchEngineMatcherCoverageTest {
     }
 
     private static MatchEngine newEngine() {
-        MarketConfig marketConfig = MarketConfig.builder()
-                .symbol(SYMBOL)
+        MatchMarketConfig marketConfig = MatchMarketConfig.builder()
+                .symbolId(1)
+                .symbolName(SYMBOL)
                 .priceScale(2)
                 .qtyScale(4)
                 .minQty(new BigDecimal("0.0010"))

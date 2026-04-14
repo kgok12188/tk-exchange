@@ -50,8 +50,17 @@ public final class SbeDecoder {
     }
 
     /**
+     * Fast-path: extract templateId from the SBE message header.
+     * Used by MatchClusteredService to dispatch to the correct handler.
+     */
+    public int extractTemplateId(DirectBuffer buffer, int offset) {
+        headerDecoder.wrap(buffer, offset);
+        return headerDecoder.templateId();
+    }
+
+    /**
      * Fast-path: extract symbolId (always the first field = first 4 bytes after header) without
-     * full decode. Works for all three command message types (templateId 1, 2, 3).
+     * full decode. Works for all command message types (templateId 1–5).
      */
     public int extractSymbolId(DirectBuffer buffer, int offset) {
         headerDecoder.wrap(buffer, offset);
@@ -105,30 +114,14 @@ public final class SbeDecoder {
                 .build();
     }
 
+    /**
+     * UpdateMarketCommand (templateId=3) is handled directly by MatchClusteredService
+     * using its own decoder; SbeDecoder returns null so the caller knows to skip the
+     * generic order-flow path.
+     */
     private OrderCommand decodeUpdateMarket(DirectBuffer buffer, int offset,
                                             int blockLength, int version) {
-        updateMarketDecoder.wrap(buffer, offset, blockLength, version);
-
-        BigDecimal minQty = Decimal64Codec.decode(updateMarketDecoder.minQty());
-        BigDecimal minTradeQuoteAmount = Decimal64Codec.decode(updateMarketDecoder.minTradeQuoteAmount());
-
-        MarketConfig marketConfig = MarketConfig.builder()
-                .priceScale(updateMarketDecoder.priceScale())
-                .qtyScale(updateMarketDecoder.qtyScale())
-                .minQty(minQty)
-                .minTradeQuoteAmount(minTradeQuoteAmount)
-                .build();
-
-        MarketUpdatePayload payload = MarketUpdatePayload.builder()
-                .marketConfig(marketConfig)
-                .configVersion(updateMarketDecoder.configVersion())
-                .force(updateMarketDecoder.force() == BooleanType.T)
-                .build();
-
-        return OrderCommand.builder()
-                .type(CommandType.UPDATE_MARKET)
-                .marketUpdatePayload(payload)
-                .build();
+        return null;
     }
 
     // ── Enum converters (SBE generated → DTO string) ─────────────────────────

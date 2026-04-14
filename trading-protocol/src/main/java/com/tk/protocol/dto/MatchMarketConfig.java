@@ -8,46 +8,53 @@ import lombok.NoArgsConstructor;
 import java.math.BigDecimal;
 
 /**
- * 单交易对撮合规则（与 match-engine 设计 §10 一致）。
+ * 单交易对撮合规则，由 match-engine Raft 共识层使用（design.md §13.2）。
+ * <p>
+ * 通过 {@code OpenMarketCommand}（templateId=4）随上币指令一次性写入 Raft log；
+ * 后续 {@code UpdateMarketCommand}（templateId=3）按 symbolId 更新规则。
  */
 @Data
 @Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
-public class MarketConfig {
+public class MatchMarketConfig {
 
-    private String symbol;
+    private int symbolId;
+
+    /**
+     * 交易对名称，如 "BTC_USDT"。仅在 OpenMarketCommand 和快照中传输，订单流只用 symbolId。
+     */
+    private String symbolName;
+
     /**
      * 价格定点小数位（与内部 long 刻度、快照互转一致）。
      */
     private int priceScale;
+
     /**
      * 数量小数位上限（校验用）。
      */
     private Integer qtyScale;
+
     /**
      * 最小委托量；null 或 0 表示不校验下限。
      */
     private BigDecimal minQty;
+
     /**
-     * 市价单：在 **quote（计价货币）** 维度，若「仍可继续成交的剩余名义」**严格小于**（{@code <}）本值，则撮合引擎 **停止继续撮合**（见 {@code com.tk.match.engine.MarketOrderMatcher}）；**trading-server / 前端** 亦可用于展示完单与解冻语义。
-     * <p>
-     * {@code null} 或 ≤0 表示不启用该规则。单位与交易对 quote 一致（如 BTC_USDT 即为 USDT）。
+     * 市价单 quote 维度最小名义金额。{@code null} 或 ≤0 表示不启用。
      */
     private BigDecimal minTradeQuoteAmount;
 
-    /**
-     * 开发/默认：带极小 {@link #minQty} 与 {@link #qtyScale}；数量步长由上层控制，DTO 可不设 step 字段。
-     */
-    public static MarketConfig defaultFor(String symbol) {
-        return MarketConfig.builder()
-                .symbol(symbol)
+    public static MatchMarketConfig defaultFor(String symbol, int symbolId) {
+        return MatchMarketConfig.builder()
+                .symbolId(symbolId)
+                .symbolName(symbol)
                 .priceScale(9)
                 .qtyScale(9)
                 .minQty(new BigDecimal("0.0000001"))
                 .build();
     }
-
 
     public BigDecimal getMinTradeQuoteAmount() {
         return minTradeQuoteAmount == null ? new BigDecimal("0.0000001") : minTradeQuoteAmount;
@@ -61,12 +68,8 @@ public class MarketConfig {
         return minQty == null ? new BigDecimal("0.0000001") : minQty;
     }
 
-    /***
-     *
-     * trading-shard 到 进入kafka 最长耗时
-     */
     public long getMaxValidTime() {
-        return 1000 * 30;
+        return 10_000;
     }
 
 }

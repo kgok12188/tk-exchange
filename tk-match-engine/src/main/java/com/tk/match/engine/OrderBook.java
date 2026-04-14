@@ -27,11 +27,11 @@ public final class OrderBook {
     private final String symbol;
 
     @Getter
-    private MarketConfig marketConfig;
+    private MatchMarketConfig matchMarketConfig;
 
-    /** Last applied {@link MarketUpdatePayload#getConfigVersion()}; -1 = never updated. */
+    /** Last applied config version from UpdateMarketCommand; -1 = never updated. */
     @Getter
-    private long appliedMarketConfigVersion = -1L;
+    private long appliedMatchMarketConfigVersion = -1L;
 
     /** Bid side: iterate desc for best bid. */
     private final LongAdaptiveRadixTreeMap<PriceLevel> buySide = new LongAdaptiveRadixTreeMap<>();
@@ -56,19 +56,19 @@ public final class OrderBook {
     private final OrderIdDeduplicate orderIdDeduplicate;
     private final ArrayStackBookOrder arrayStackBookOrder;
 
-    public OrderBook(String symbol, MarketConfig marketConfig, ArrayStackBookOrder arrayStackBookOrder) {
-        if (StringUtils.isEmpty(symbol) || marketConfig == null) {
-            throw new IllegalArgumentException("symbol and marketConfig must not be null");
+    public OrderBook(String symbol, MatchMarketConfig matchMarketConfig, ArrayStackBookOrder arrayStackBookOrder) {
+        if (StringUtils.isEmpty(symbol) || matchMarketConfig == null) {
+            throw new IllegalArgumentException("symbol and matchMarketConfig must not be null");
         }
         this.symbol = symbol;
-        this.marketConfig = marketConfig;
+        this.matchMarketConfig = matchMarketConfig;
         this.orderIdDeduplicate = new OrderIdDeduplicate(DUPLICATE_ID_WINDOW_SIZE, DUPLICATE_ID_WINDOW_INTERVAL_MILLIS);
         this.arrayStackBookOrder = arrayStackBookOrder;
     }
 
-    public void applyMarketConfig(MarketConfig cfg, long configVersion) {
-        this.marketConfig = cfg;
-        this.appliedMarketConfigVersion = configVersion;
+    public void applyMatchMarketConfig(MatchMarketConfig cfg, long configVersion) {
+        this.matchMarketConfig = cfg;
+        this.appliedMatchMarketConfigVersion = configVersion;
     }
 
     public boolean isEmpty() {
@@ -78,7 +78,7 @@ public final class OrderBook {
     /**
      * Resting orders that would become non-compliant under the candidate config.
      */
-    public List<BookOrder> findNonCompliantOrders(MarketConfig candidate) {
+    public List<BookOrder> findNonCompliantOrders(MatchMarketConfig candidate) {
         if (candidate == null) {
             return Collections.emptyList();
         }
@@ -86,7 +86,7 @@ public final class OrderBook {
         if (all.isEmpty()) {
             return Collections.emptyList();
         }
-        if (candidate.getPriceScale() != marketConfig.getPriceScale()) {
+        if (candidate.getPriceScale() != matchMarketConfig.getPriceScale()) {
             return Collections.unmodifiableList(new ArrayList<>(all));
         }
         List<BookOrder> nonCompliant = new ArrayList<>();
@@ -147,9 +147,9 @@ public final class OrderBook {
      * Push a new order into the book. {@code seq} = matchSeq used as price-time priority key.
      */
     public MatchResult pushOrder(OrderPayload payload, long seq, long timestamp) {
-        BookOrder takerOrder = arrayStackBookOrder.pop().parse(payload, seq, marketConfig);
+        BookOrder takerOrder = arrayStackBookOrder.pop().parse(payload, seq, matchMarketConfig);
 
-        if ((timestamp - payload.getCreateTime()) > marketConfig.getMaxValidTime()
+        if ((timestamp - payload.getCreateTime()) > matchMarketConfig.getMaxValidTime()
                 || payload.getCreateTime() > timestamp) {
             MatchResult result = MatchResult.of(Collections.emptyList(),
                     Collections.singletonList(finishOrder(takerOrder, FinishStatus.REJECT, payload.getVolume(), payload.getAmount(), RejectReason.ORDER_EXPIRED)));
@@ -255,7 +255,7 @@ public final class OrderBook {
      */
     public void restoreOrder(long orderId, long uid, int shardId, String side,
                              BigDecimal price, BigDecimal remainingVolume, long seq) {
-        long ticks = PriceCodec.encode(price, marketConfig.getPriceScale());
+        long ticks = PriceCodec.encode(price, matchMarketConfig.getPriceScale());
         BookOrder order = new BookOrder(orderId, uid, shardId, side, price, ticks, remainingVolume, seq);
         addToBook(order);
     }

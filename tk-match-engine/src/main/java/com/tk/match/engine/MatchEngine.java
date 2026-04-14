@@ -11,27 +11,33 @@ import java.util.List;
  * Per-symbol match engine: deterministic state machine, single-threaded.
  * Driven by ordered commands from Aeron Cluster Raft log (onSessionMessage).
  * <p>
- * {@code seq} replaces the old Kafka orderReqOffset: it is the global {@code matchSeq}
- * assigned by {@code MatchClusteredService}, used for BookOrder price-time priority.
- * Raft consensus guarantees each command is processed exactly once — no in-engine dedup needed.
+ * Admin commands (OpenMarket / CloseMarket / UpdateMarket) are handled by
+ * {@code MatchClusteredService} directly; this engine only processes order flow.
  */
 @Getter
 public class MatchEngine {
 
     private final String symbol;
     private final OrderBook book;
+    private boolean closed;
 
-    public MatchEngine(String symbol, MarketConfig initialConfig, ArrayStackBookOrder arrayStackBookOrder) {
+    public MatchEngine(String symbol, MatchMarketConfig initialConfig, ArrayStackBookOrder arrayStackBookOrder) {
         this.symbol = symbol;
         this.book = new OrderBook(symbol, initialConfig, arrayStackBookOrder);
+        this.closed = false;
+    }
+
+    public boolean isClosed() {
+        return closed;
     }
 
     /**
-     * Process one command. Returns a MatchResponse if there are trades or finish orders,
-     * or null for no-op commands. Callers (ClusteredService) must wrap null → empty MatchResult.
+     * Process one order command (PUSH_ORDER or CANCEL_ORDER).
+     * Returns a MatchResponse, or null for unrecognized commands.
+     * Callers (ClusteredService) must wrap null → empty MatchResult.
      *
-     * @param cmd       decoded command (PUSH_ORDER / CANCEL_ORDER / UPDATE_MARKET)
-     * @param seq       global matchSeq from ClusteredService (used for price-time priority in book)
+     * @param cmd       decoded command
+     * @param seq       global matchSeq from ClusteredService
      * @param timestamp cluster timestamp (epoch ms)
      */
     public MatchResponse process(OrderCommand cmd, long seq, long timestamp) {
@@ -39,8 +45,6 @@ public class MatchEngine {
             return null;
         }
         switch (cmd.getType()) {
-            case UPDATE_MARKET:
-                return processUpdateMarket(cmd, seq);
             case PUSH_ORDER: {
                 OrderPayload push = cmd.getPushPayload();
                 if (push == null) {
@@ -83,30 +87,57 @@ public class MatchEngine {
         }
     }
 
-    private MatchResponse processUpdateMarket(OrderCommand cmd, long seq) {
-        MarketUpdatePayload marketUpdatePayload = cmd.getMarketUpdatePayload();
-        if (marketUpdatePayload == null || marketUpdatePayload.getMarketConfig() == null) {
-            return null;
-        }
-        if (marketUpdatePayload.getConfigVersion() <= book.getAppliedMarketConfigVersion()) {
+    /**
+     * Apply a new market configuration update (called by ClusteredService for UpdateMarketCommand).
+     * If {@code force=true}, non-compliant resting orders are cancelled first; if {@code force=false}
+     * and non-compliant orders exist, the update is silently rejected (idempotent empty response).
+     *
+     * @param cfg           new market config
+     * @param configVersion must be greater than the currently applied version; older versions are ignored
+     * @param force         true = cancel non-compliant orders before applying
+     * @return empty response (trades=[], finishOrders=cancelled orders if force=true)
+     */
+    public MatchResponse applyConfig(MatchMarketConfig cfg, long configVersion, boolean force) {
+        if (configVersion <= book.getAppliedMatchMarketConfigVersion()) {
             return emptyResponse();
         }
-        MarketConfig cfg = marketUpdatePayload.getMarketConfig();
-        if (cfg.getSymbol() != null && !cfg.getSymbol().equals(symbol)) {
-            return null;
-        }
-        MarketConfig effective = cfg.getSymbol() == null ? cfg.toBuilder().symbol(symbol).build() : cfg;
-
-        List<BookOrder> nonCompliantOrders = book.findNonCompliantOrders(effective);
-        if (!nonCompliantOrders.isEmpty() && !marketUpdatePayload.isForce()) {
+        List<BookOrder> nonCompliant = book.findNonCompliantOrders(cfg);
+        if (!nonCompliant.isEmpty() && !force) {
             return emptyResponse();
         }
         List<FinishOrder> finishes = new ArrayList<>();
-        for (BookOrder nonCompliant : nonCompliantOrders) {
-            MatchResult cancelResult = book.cancelOrder(nonCompliant.getOrderId());
+        for (BookOrder order : nonCompliant) {
+            MatchResult cancelResult = book.cancelOrder(order.getOrderId());
             finishes.addAll(cancelResult.getFinishOrders());
         }
-        book.applyMarketConfig(effective, marketUpdatePayload.getConfigVersion());
+        book.applyMatchMarketConfig(cfg, configVersion);
+        return MatchResponse.builder()
+                .taker(null)
+                .trades(Collections.emptyList())
+                .finishOrders(finishes)
+                .build();
+    }
+
+    /**
+     * Close this market (called by ClusteredService for CloseMarketCommand).
+     * If {@code force=true}, all resting orders are cancelled before marking closed.
+     * If {@code force=false} and orders remain, does nothing (caller should emit empty MatchResult).
+     *
+     * @return MatchResponse containing cancelled orders (may be empty)
+     */
+    public MatchResponse close(boolean force) {
+        if (closed) {
+            return emptyResponse();
+        }
+        List<FinishOrder> finishes = new ArrayList<>();
+        if (force) {
+            List<BookOrder> allOrders = new ArrayList<>(book.exportOrders());
+            for (BookOrder order : allOrders) {
+                MatchResult cancelResult = book.cancelOrder(order.getOrderId());
+                finishes.addAll(cancelResult.getFinishOrders());
+            }
+        }
+        closed = true;
         return MatchResponse.builder()
                 .taker(null)
                 .trades(Collections.emptyList())

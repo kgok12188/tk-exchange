@@ -1,7 +1,19 @@
 package com.tk.futures.admin;
 
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.client.RestTemplate;
+
+@SpringBootApplication
 public class AdminApiApplication {
+
     public static void main(String[] args) {
-        org.springframework.boot.SpringApplication.run(AdminApiApplication.class, args);
+        SpringApplication.run(AdminApiApplication.class, args);
+    }
+
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
     }
 }

@@ -7,7 +7,7 @@ public enum CommandType {
     PUSH_ORDER,
     CANCEL_ORDER,
     /**
-     * 更新本 symbol 的 {@link MarketConfig}（与撮合指令同 topic 同序）。
+     * 更新本 symbol 的 {@link MatchMarketConfig}（与撮合指令同 Raft log 同序）。
      */
     UPDATE_MARKET
 }

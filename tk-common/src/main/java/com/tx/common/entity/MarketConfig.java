@@ -135,4 +135,11 @@ public class MarketConfig {
 
     private String jsonConfig; // cfd 外部接口配置
 
+    /**
+     * 市价单 quote 维度最小名义金额（DB: min_trade_quote_amount）。
+     * null 或 ≤0 表示不启用。与 {@code com.tk.protocol.dto.MatchMarketConfig#minTradeQuoteAmount} 对应。
+     */
+    @TableField(value = "min_trade_quote_amount")
+    private BigDecimal minTradeQuoteAmount;
+
 }

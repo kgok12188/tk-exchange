@@ -24,7 +24,7 @@ public class LimitIocOrderMatcher extends LimitOrderMatcher {
     public MatchResult match(BookOrder takerOrder, long orderReqOffset) {
         List<TradeOrder> trades = new ArrayList<>(4);
         List<FinishOrder> finishes = new ArrayList<>(4);
-        int scale = orderBook.getMarketConfig().getPriceScale();
+        int scale = orderBook.getMatchMarketConfig().getPriceScale();
 
         OppositeSideWalk walk = OppositeSideWalk.forTaker(takerOrder);
         long takerTicks = takerOrder.getPriceTicks();

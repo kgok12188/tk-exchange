@@ -61,10 +61,10 @@
             <artifactId>lombok</artifactId>
         </dependency>
 
-        <!-- Spring Boot (non-web; provides lifecycle, config binding, logging) -->
+        <!-- Spring Boot web: admin HTTP endpoints (openMarket / closeMarket / updateMarket) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter</artifactId>
+            <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
         <!-- Testing -->

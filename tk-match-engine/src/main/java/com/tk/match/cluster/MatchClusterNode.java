@@ -1,5 +1,6 @@
 package com.tk.match.cluster;
 
+import com.tk.match.output.MatchResultSideChannel;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.client.AeronArchive;
@@ -15,7 +16,6 @@ import org.springframework.stereotype.Component;
 
 import com.tk.match.config.ClusterStackConfig;
 import com.tk.match.config.MdcEgressConfig;
-import com.tk.match.output.MatchResultEgressImpl;
 
 import java.io.File;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -33,12 +33,14 @@ public class MatchClusterNode implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(MatchClusterNode.class);
 
-    /** 集群 Archive 本地 IPC 控制。 */
+    /**
+     * 集群 Archive 本地 IPC 控制。
+     */
     private static final String CLUSTER_ARCHIVE_LOCAL_CONTROL = "aeron:ipc?alias=archive-local-control";
 
     private final ClusterStackConfig cluster;
     private final MdcEgressConfig mdc;
-    private final MatchResultEgressImpl matchResultEgress;
+    private final MatchResultSideChannel matchResultSideChannel;
     private final MatchClusteredService service;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -46,7 +48,9 @@ public class MatchClusterNode implements SmartLifecycle {
     private volatile MediaDriver clusterMediaDriver;
     private volatile MediaDriver mdcMediaDriver;
     private volatile Archive clusterArchive;
-    /** MDC 侧 Archive：spy 录制撮合结果，与集群 Archive 完全隔离。 */
+    /**
+     * MDC 侧 Archive：spy 录制撮合结果，与集群 Archive 完全隔离。
+     */
     private volatile Archive mdcArchive;
     private volatile ConsensusModule consensusModule;
     private volatile ClusteredServiceContainer container;
@@ -54,11 +58,11 @@ public class MatchClusterNode implements SmartLifecycle {
     public MatchClusterNode(
             ClusterStackConfig clusterStackConfig,
             MdcEgressConfig mdcEgressConfig,
-            MatchResultEgressImpl matchResultEgressImpl,
+            MatchResultSideChannel matchResultEgressImpl,
             MatchClusteredService service) {
         this.cluster = clusterStackConfig;
         this.mdc = mdcEgressConfig;
-        this.matchResultEgress = matchResultEgressImpl;
+        this.matchResultSideChannel = matchResultEgressImpl;
         this.service = service;
     }
 
@@ -105,7 +109,7 @@ public class MatchClusterNode implements SmartLifecycle {
 
     @Override
     public int getPhase() {
-        return Integer.MAX_VALUE;
+        return Integer.MAX_VALUE - 100;
     }
 
     // ── Cluster bootstrap ─────────────────────────────────────────────────────
@@ -127,7 +131,7 @@ public class MatchClusterNode implements SmartLifecycle {
         container = ClusteredServiceContainer.launch(containerContext(errorHandler));
 
         // ── 4. Egress 客户端连接 MDC Archive ──────────────────────────────
-        matchResultEgress.connectAeronClientsOrThrow();
+        matchResultSideChannel.connectAeronClientsOrThrow();
     }
 
     // ── Context builders ──────────────────────────────────────────────────────
@@ -167,7 +171,9 @@ public class MatchClusterNode implements SmartLifecycle {
                 .deleteArchiveOnStart(false);
     }
 
-    /** MDC 侧 Archive：挂在 MDC MediaDriver 上，供 spy 录制撮合结果。 */
+    /**
+     * MDC 侧 Archive：挂在 MDC MediaDriver 上，供 spy 录制撮合结果。
+     */
     private Archive.Context mdcArchiveContext(ErrorHandler errorHandler) {
         return new Archive.Context()
                 .aeronDirectoryName(mdc.getAeronDir())
@@ -206,7 +212,9 @@ public class MatchClusterNode implements SmartLifecycle {
                 .errorHandler(errorHandler);
     }
 
-    /** Consensus / Container 嵌入式连 cluster Archive 的 IPC 上下文。 */
+    /**
+     * Consensus / Container 嵌入式连 cluster Archive 的 IPC 上下文。
+     */
     private AeronArchive.Context clusterEmbeddedArchiveClientContext() {
         int localRequestStreamId = cluster.getArchiveControlRequestStreamId() + 100;
         int localResponseStreamId = localRequestStreamId + 1;
@@ -221,7 +229,7 @@ public class MatchClusterNode implements SmartLifecycle {
     // ── Shutdown ──────────────────────────────────────────────────────────────
 
     private void shutdownAll() {
-        matchResultEgress.shutdown();
+        matchResultSideChannel.shutdown();
         closeQuietly(container);
         container = null;
         closeQuietly(consensusModule);

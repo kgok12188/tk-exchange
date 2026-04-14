@@ -1,6 +1,6 @@
 package com.tk.match.engine;
 
-import com.tk.protocol.dto.MarketConfig;
+import com.tk.protocol.dto.MatchMarketConfig;
 import com.tk.protocol.dto.OrderPayload;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
@@ -48,7 +48,7 @@ public class BookOrder {
 
     }
 
-    public BookOrder parse(OrderPayload payload, long orderReqOffset, MarketConfig marketConfig) {
+    public BookOrder parse(OrderPayload payload, long orderReqOffset, MatchMarketConfig marketConfig) {
         this.orderId = payload.getId();
         this.uid = payload.getUid();
         this.shardId = payload.getShardId();
@@ -66,7 +66,7 @@ public class BookOrder {
         return this;
     }
 
-    public BookOrder(OrderPayload payload, long orderReqOffset, MarketConfig marketConfig) {
+    public BookOrder(OrderPayload payload, long orderReqOffset, MatchMarketConfig marketConfig) {
         this.parse(payload, orderReqOffset, marketConfig);
     }
 

@@ -3,8 +3,7 @@ package com.tk.match.engine;
 import com.tk.protocol.dto.CancelPayload;
 import com.tk.protocol.dto.CommandType;
 import com.tk.protocol.dto.FinishStatus;
-import com.tk.protocol.dto.MarketConfig;
-import com.tk.protocol.dto.MarketUpdatePayload;
+import com.tk.protocol.dto.MatchMarketConfig;
 import com.tk.protocol.dto.MatchResponse;
 import com.tk.protocol.dto.OrderCommand;
 import com.tk.protocol.dto.OrderPayload;
@@ -13,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -23,7 +23,7 @@ class MatchEngineProcessTest {
     private static final long BASE_TIMESTAMP = 1_700_000_000_000L;
 
     @Test
-    void processReturnsNullWhenOffsetIsNotGreater() {
+    void processAlwaysHandlesCommandRegardlessOfSeq() {
         MatchEngine matchEngine = newEngine();
 
         OrderCommand firstCommand = pushLimitOrderCommand(10001L, 2001L, "BUY", "100.00", "1.0000", "GTC");
@@ -31,8 +31,8 @@ class MatchEngineProcessTest {
         assertNotNull(firstResponse);
 
         OrderCommand secondCommand = pushLimitOrderCommand(10002L, 2002L, "BUY", "101.00", "1.0000", "GTC");
-        MatchResponse duplicateOffsetResponse = matchEngine.process(secondCommand, 10L, BASE_TIMESTAMP);
-        assertNull(duplicateOffsetResponse);
+        MatchResponse sameSeqResponse = matchEngine.process(secondCommand, 10L, BASE_TIMESTAMP);
+        assertNotNull(sameSeqResponse, "Raft guarantees exactly-once delivery; engine does not dedup by seq");
     }
 
     @Test
@@ -81,75 +81,87 @@ class MatchEngineProcessTest {
         assertTrue(cancelResponse.getTrades().isEmpty());
     }
 
+    // ── applyConfig tests ────────────────────────────────────────────────────
+
     @Test
-    void processUpdateMarketIgnoresOlderConfigVersion() {
+    void applyConfigIgnoresOlderConfigVersion() {
         MatchEngine matchEngine = newEngine();
 
-        OrderCommand firstUpdate = updateMarketCommand(5L, false, "0.0100", 2);
-        MatchResponse firstResponse = matchEngine.process(firstUpdate, 1L, BASE_TIMESTAMP);
+        MatchResponse firstResponse = matchEngine.applyConfig(configWith("0.0100", 2), 5L, false);
         assertNotNull(firstResponse);
 
-        OrderCommand staleUpdate = updateMarketCommand(4L, true, "0.1000", 2);
-        MatchResponse staleResponse = matchEngine.process(staleUpdate, 2L, BASE_TIMESTAMP);
+        MatchResponse staleResponse = matchEngine.applyConfig(configWith("0.1000", 2), 4L, true);
         assertNotNull(staleResponse);
-        assertTrue(staleResponse.getFinishOrders().isEmpty());
+        assertTrue(staleResponse.getFinishOrders().isEmpty(), "Stale version should be ignored");
     }
 
     @Test
-    void processUpdateMarketReturnsNullWhenSymbolMismatches() {
-        MatchEngine matchEngine = newEngine();
-        MarketConfig mismatchConfig = MarketConfig.builder()
-                .symbol("ETH_USDT")
-                .priceScale(2)
-                .qtyScale(4)
-                .minQty(new BigDecimal("0.0010"))
-                .minTradeQuoteAmount(new BigDecimal("1.00"))
-                .build();
-        OrderCommand command = OrderCommand.builder()
-                .type(CommandType.UPDATE_MARKET)
-                .symbol(SYMBOL)
-                .marketUpdatePayload(MarketUpdatePayload.builder()
-                        .marketConfig(mismatchConfig)
-                        .configVersion(1L)
-                        .force(false)
-                        .build())
-                .build();
-
-        MatchResponse response = matchEngine.process(command, 1L, BASE_TIMESTAMP);
-        assertNull(response);
-    }
-
-    @Test
-    void processUpdateMarketForceFalseDoesNotApplyWhenBookHasNonCompliantOrders() {
+    void applyConfigForceFalseDoesNotApplyWhenBookHasNonCompliantOrders() {
         MatchEngine matchEngine = newEngine();
         matchEngine.process(pushLimitOrderCommand(12001L, 9001L, "BUY", "100.00", "0.0050", "GTC"), 1L, BASE_TIMESTAMP);
 
-        OrderCommand command = updateMarketCommand(2L, false, "0.0100", 2);
-        MatchResponse response = matchEngine.process(command, 2L, BASE_TIMESTAMP);
+        MatchResponse response = matchEngine.applyConfig(configWith("0.0100", 2), 2L, false);
 
         assertNotNull(response);
         assertTrue(response.getFinishOrders().isEmpty());
-        assertEquals(new BigDecimal("0.0010"), matchEngine.getBook().getMarketConfig().getMinQty());
+        assertEquals(new BigDecimal("0.0010"), matchEngine.getBook().getMatchMarketConfig().getMinQty());
     }
 
     @Test
-    void processUpdateMarketForceTrueCancelsNonCompliantOrdersAndAppliesConfig() {
+    void applyConfigForceTrueCancelsNonCompliantOrdersAndAppliesConfig() {
         MatchEngine matchEngine = newEngine();
         matchEngine.process(pushLimitOrderCommand(13001L, 9101L, "BUY", "100.00", "0.0050", "GTC"), 1L, BASE_TIMESTAMP);
         matchEngine.process(pushLimitOrderCommand(13002L, 9102L, "SELL", "200.00", "0.0060", "GTC"), 2L, BASE_TIMESTAMP);
 
-        OrderCommand command = updateMarketCommand(3L, true, "0.0100", 2);
-        MatchResponse response = matchEngine.process(command, 3L, BASE_TIMESTAMP);
+        MatchResponse response = matchEngine.applyConfig(configWith("0.0100", 2), 3L, true);
 
         assertNotNull(response);
         assertEquals(2, response.getFinishOrders().size());
         assertEquals(0, matchEngine.getBook().getOrderCount());
-        assertEquals(new BigDecimal("0.0100"), matchEngine.getBook().getMarketConfig().getMinQty());
+        assertEquals(new BigDecimal("0.0100"), matchEngine.getBook().getMatchMarketConfig().getMinQty());
     }
 
+    // ── close tests ──────────────────────────────────────────────────────────
+
+    @Test
+    void closeWithForceCancelsAllRestingOrders() {
+        MatchEngine matchEngine = newEngine();
+        matchEngine.process(pushLimitOrderCommand(14001L, 9201L, "BUY", "100.00", "1.0000", "GTC"), 1L, BASE_TIMESTAMP);
+        matchEngine.process(pushLimitOrderCommand(14002L, 9202L, "SELL", "200.00", "1.0000", "GTC"), 2L, BASE_TIMESTAMP);
+
+        MatchResponse response = matchEngine.close(true);
+
+        assertNotNull(response);
+        assertEquals(2, response.getFinishOrders().size());
+        assertTrue(matchEngine.isClosed());
+        assertEquals(0, matchEngine.getBook().getOrderCount());
+    }
+
+    @Test
+    void closeWithoutForceMarkesEngineClosed() {
+        MatchEngine matchEngine = newEngine();
+
+        MatchResponse response = matchEngine.close(false);
+
+        assertNotNull(response);
+        assertTrue(response.getFinishOrders().isEmpty());
+        assertTrue(matchEngine.isClosed());
+    }
+
+    @Test
+    void closeIsIdempotent() {
+        MatchEngine matchEngine = newEngine();
+        matchEngine.close(false);
+        assertFalse(matchEngine.close(false).getFinishOrders().size() > 0);
+        assertTrue(matchEngine.isClosed());
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
     private static MatchEngine newEngine() {
-        MarketConfig marketConfig = MarketConfig.builder()
-                .symbol(SYMBOL)
+        MatchMarketConfig marketConfig = MatchMarketConfig.builder()
+                .symbolId(1)
+                .symbolName(SYMBOL)
                 .priceScale(2)
                 .qtyScale(4)
                 .minQty(new BigDecimal("0.0010"))
@@ -158,7 +170,19 @@ class MatchEngineProcessTest {
         return new MatchEngine(SYMBOL, marketConfig, new ArrayStackBookOrder(2048));
     }
 
-    private static OrderCommand pushLimitOrderCommand(long orderId, long uid, String side, String price, String volume, String timeInForce) {
+    private static MatchMarketConfig configWith(String minQty, int priceScale) {
+        return MatchMarketConfig.builder()
+                .symbolId(1)
+                .symbolName(SYMBOL)
+                .priceScale(priceScale)
+                .qtyScale(4)
+                .minQty(new BigDecimal(minQty))
+                .minTradeQuoteAmount(new BigDecimal("1.00"))
+                .build();
+    }
+
+    private static OrderCommand pushLimitOrderCommand(long orderId, long uid, String side,
+                                                      String price, String volume, String timeInForce) {
         OrderPayload payload = OrderPayload.builder()
                 .id(orderId)
                 .uid(uid)
@@ -175,25 +199,6 @@ class MatchEngineProcessTest {
                 .type(CommandType.PUSH_ORDER)
                 .symbol(SYMBOL)
                 .pushPayload(payload)
-                .build();
-    }
-
-    private static OrderCommand updateMarketCommand(long configVersion, boolean force, String minQty, int priceScale) {
-        MarketConfig marketConfig = MarketConfig.builder()
-                .symbol(SYMBOL)
-                .priceScale(priceScale)
-                .qtyScale(4)
-                .minQty(new BigDecimal(minQty))
-                .minTradeQuoteAmount(new BigDecimal("1.00"))
-                .build();
-        return OrderCommand.builder()
-                .type(CommandType.UPDATE_MARKET)
-                .symbol(SYMBOL)
-                .marketUpdatePayload(MarketUpdatePayload.builder()
-                        .marketConfig(marketConfig)
-                        .configVersion(configVersion)
-                        .force(force)
-                        .build())
                 .build();
     }
 }

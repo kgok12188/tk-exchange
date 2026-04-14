@@ -1,13 +1,15 @@
 package com.tk.match.cluster;
 
+import com.tk.match.admin.AdminCommandResult;
+import com.tk.match.admin.PendingCommandRegistry;
 import com.tk.match.engine.ArrayStackBookOrder;
 import com.tk.match.engine.MatchEngine;
-import com.tk.match.output.MatchResultEgress;
+import com.tk.match.output.MatchResultSideChannel;
+import com.tk.protocol.dto.*;
 import com.tk.protocol.sbe.Decimal64Codec;
 import com.tk.protocol.sbe.SbeDecoder;
 import com.tk.protocol.sbe.SbeEncoder;
 import com.tk.protocol.sbe.generated.*;
-import com.tk.protocol.dto.*;
 import io.aeron.ExclusivePublication;
 import io.aeron.Image;
 import io.aeron.cluster.codecs.CloseReason;
@@ -26,14 +28,25 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * {@link ClusteredService}：共识入口、SBE、订单簿与集群快照。
- * MatchResult 写 MDC、Archive 录制与 dedup 由 {@link MatchResultEgress} 在 {@link #onStart} 经 {@link MatchResultEgress#startMatchResultPipeline(boolean, long)} 完成。
+ * Aeron ClusteredService：共识入口，按 SBE templateId 分发订单与 admin 指令。
+ * <p>
+ * 消息路由（design.md §3 / §13）:
+ * <ul>
+ *   <li>templateId=1 PushOrderCommand  → engine.process()</li>
+ *   <li>templateId=2 CancelOrderCommand → engine.process()</li>
+ *   <li>templateId=3 UpdateMarketCommand → engine.applyConfig()</li>
+ *   <li>templateId=4 OpenMarketCommand → 创建 MatchEngine（幂等）</li>
+ *   <li>templateId=5 CloseMarketCommand → engine.close()</li>
+ * </ul>
+ * 所有命令统一执行 {@code nextMatchSeq++}，产出 MatchResult（admin 命令产出空结果）。
  */
 @Component
 public class MatchClusteredService implements ClusteredService {
@@ -43,27 +56,46 @@ public class MatchClusteredService implements ClusteredService {
     private static final int BOOK_ORDER_POOL_SIZE = 4096;
     private static final int ENCODING_BUFFER_CAPACITY = 16 * 1024 * 1024;
 
+    /**
+     * symbolId → MatchEngine；每个 symbol 独立状态机。
+     */
     private final Map<Integer, MatchEngine> engines = new HashMap<>();
+    /**
+     * symbolId → symbolName；由 OpenMarketCommand 写入，快照恢复时重建。
+     */
     private final Map<Integer, String> symbolNames = new HashMap<>();
 
     private long nextMatchSeq = 0;
 
-    private final MatchResultEgress matchResultEgress;
+    /**
+     * 零 UUID 表示命令非 HTTP 发起，无需回调。
+     */
+    private static final UUID NULL_UUID = new UUID(0L, 0L);
+
+    private final MatchResultSideChannel matchResultSideChannel;
+    private final PendingCommandRegistry pendingCommandRegistry;
     private final SbeDecoder sbeDecoder = new SbeDecoder();
     private final SbeEncoder sbeEncoder = new SbeEncoder();
     private final MutableDirectBuffer encodingBuffer = new ExpandableDirectByteBuffer(ENCODING_BUFFER_CAPACITY);
 
+    // ── Ingress decoders ─────────────────────────────────────────────────────
     private final MessageHeaderDecoder headerDecoder = new MessageHeaderDecoder();
+    private final UpdateMarketCommandDecoder updateMarketDecoder = new UpdateMarketCommandDecoder();
+    private final OpenMarketCommandDecoder openMarketDecoder = new OpenMarketCommandDecoder();
+    private final CloseMarketCommandDecoder closeMarketDecoder = new CloseMarketCommandDecoder();
+
+    // ── Snapshot decoders ─────────────────────────────────────────────────────
     private final SnapshotHeaderDecoder snapshotHeaderDecoder = new SnapshotHeaderDecoder();
     private final SnapshotSymbolHeaderDecoder symbolHeaderDecoder = new SnapshotSymbolHeaderDecoder();
     private final SnapshotBookOrderDecoder bookOrderDecoder = new SnapshotBookOrderDecoder();
 
     private final IdleStrategy idleStrategy = new YieldingIdleStrategy();
-
     private final ArrayStackBookOrder arrayStackBookOrder = new ArrayStackBookOrder(BOOK_ORDER_POOL_SIZE);
 
-    public MatchClusteredService(MatchResultEgress matchResultEgress) {
-        this.matchResultEgress = matchResultEgress;
+    public MatchClusteredService(MatchResultSideChannel matchResultSideChannel,
+                                 PendingCommandRegistry pendingCommandRegistry) {
+        this.matchResultSideChannel = matchResultSideChannel;
+        this.pendingCommandRegistry = pendingCommandRegistry;
     }
 
     @Override
@@ -72,8 +104,7 @@ public class MatchClusteredService implements ClusteredService {
         if (restoredFromSnapshot) {
             loadSnapshot(snapshotImage);
         }
-        nextMatchSeq = matchResultEgress.startMatchResultPipeline(restoredFromSnapshot, nextMatchSeq);
-
+        nextMatchSeq = matchResultSideChannel.startMatchResultPipeline(restoredFromSnapshot, nextMatchSeq);
         log.info("MatchClusteredService started: nextMatchSeq={}", nextMatchSeq);
     }
 
@@ -87,19 +118,119 @@ public class MatchClusteredService implements ClusteredService {
         log.info("Client session closed: sessionId={} reason={}", session.id(), closeReason);
     }
 
+    /**
+     * 唯一的 Raft 共识入口，所有节点确定性地执行相同的分发逻辑。
+     * 每条消息最终均执行 nextMatchSeq++ 并产出 MatchResult。
+     */
     @Override
-    public void onSessionMessage(
-            ClientSession session, long timestamp,
-            DirectBuffer buffer, int offset, int length, Header header) {
+    public void onSessionMessage(ClientSession session, long timestamp,
+                                 DirectBuffer buffer, int offset, int length, Header header) {
 
-        OrderCommand cmd = sbeDecoder.decode(buffer, offset, length);
-        int symbolId = sbeDecoder.extractSymbolId(buffer, offset);
+        int templateId = sbeDecoder.extractTemplateId(buffer, offset);
+        int bodyOffset = offset + headerDecoder.wrap(buffer, offset).encodedLength();
+        int blockLength = headerDecoder.blockLength();
+        int schemaVersion = headerDecoder.version();
 
-        MatchEngine engine = engines.computeIfAbsent(symbolId, this::createDefaultEngine);
+        switch (templateId) {
+            case PushOrderCommandDecoder.TEMPLATE_ID:
+            case CancelOrderCommandDecoder.TEMPLATE_ID: {
+                int symbolId = sbeDecoder.extractSymbolId(buffer, offset);
+                MatchEngine engine = engines.get(symbolId);
+                MatchResponse response;
+                if (engine == null) {
+                    response = rejectUnknownSymbol(symbolId);
+                } else if (engine.isClosed()) {
+                    response = rejectMarketClosed(symbolId);
+                } else {
+                    OrderCommand cmd = sbeDecoder.decode(buffer, offset, length);
+                    response = (cmd != null) ? engine.process(cmd, nextMatchSeq, timestamp) : null;
+                }
+                emitMatchResult(symbolId, response);
+                break;
+            }
 
-        MatchResponse response = (cmd != null) ? engine.process(cmd, nextMatchSeq, timestamp) : null;
+            case UpdateMarketCommandDecoder.TEMPLATE_ID: {
+                updateMarketDecoder.wrap(buffer, bodyOffset, blockLength, schemaVersion);
+                int symbolId = (int) updateMarketDecoder.symbolId();
+                MatchEngine engine = engines.get(symbolId);
+                MatchResponse response = null;
+                String updateRejectReason = null;
+                if (engine == null) {
+                    updateRejectReason = "UNKNOWN_SYMBOL";
+                } else if (engine.isClosed()) {
+                    updateRejectReason = "MARKET_CLOSED";
+                } else {
+                    BigDecimal minQty = Decimal64Codec.decode(updateMarketDecoder.minQty());
+                    BigDecimal minTradeQuoteAmount = Decimal64Codec.decode(updateMarketDecoder.minTradeQuoteAmount());
+                    MatchMarketConfig cfg = MatchMarketConfig.builder()
+                            .symbolId(symbolId)
+                            .symbolName(symbolNames.getOrDefault(symbolId, ""))
+                            .priceScale(updateMarketDecoder.priceScale())
+                            .qtyScale(updateMarketDecoder.qtyScale())
+                            .minQty(minQty)
+                            .minTradeQuoteAmount(minTradeQuoteAmount)
+                            .build();
+                    boolean force = updateMarketDecoder.force() == BooleanType.T;
+                    response = engine.applyConfig(cfg, updateMarketDecoder.configVersion(), force);
+                }
+                emitMatchResult(symbolId, response);
+                notifyPendingCommand(updateMarketDecoder.uuidHigh(), updateMarketDecoder.uuidLow(), updateRejectReason);
+                break;
+            }
 
-        emitMatchResult(symbolId, response);
+            case OpenMarketCommandDecoder.TEMPLATE_ID: {
+                openMarketDecoder.wrap(buffer, bodyOffset, blockLength, schemaVersion);
+                int symbolId = (int) openMarketDecoder.symbolId();
+                String openRejectReason = null;
+                if (!engines.containsKey(symbolId)) {
+                    String symbolName = openMarketDecoder.symbolName();
+                    BigDecimal minQty = Decimal64Codec.decode(openMarketDecoder.minQty());
+                    BigDecimal minTradeQuoteAmount = Decimal64Codec.decode(openMarketDecoder.minTradeQuoteAmount());
+                    MatchMarketConfig cfg = MatchMarketConfig.builder()
+                            .symbolId(symbolId)
+                            .symbolName(symbolName)
+                            .priceScale(openMarketDecoder.priceScale())
+                            .qtyScale(openMarketDecoder.qtyScale())
+                            .minQty(minQty)
+                            .minTradeQuoteAmount(minTradeQuoteAmount)
+                            .build();
+                    engines.put(symbolId, new MatchEngine(symbolName, cfg, arrayStackBookOrder));
+                    symbolNames.put(symbolId, symbolName);
+                    engines.get(symbolId).getBook().applyMatchMarketConfig(cfg, openMarketDecoder.configVersion());
+                    log.info("Market opened: symbolId={} name={}", symbolId, symbolName);
+                } else {
+                    openRejectReason = "SYMBOL_ALREADY_EXISTS";
+                }
+                emitMatchResult(symbolId, null);
+                notifyPendingCommand(openMarketDecoder.uuidHigh(), openMarketDecoder.uuidLow(), openRejectReason);
+                break;
+            }
+
+            case CloseMarketCommandDecoder.TEMPLATE_ID: {
+                closeMarketDecoder.wrap(buffer, bodyOffset, blockLength, schemaVersion);
+                int symbolId = (int) closeMarketDecoder.symbolId();
+                MatchEngine engine = engines.get(symbolId);
+                MatchResponse response = null;
+                String closeRejectReason = null;
+                if (engine == null) {
+                    closeRejectReason = "UNKNOWN_SYMBOL";
+                } else if (engine.isClosed()) {
+                    closeRejectReason = "MARKET_CLOSED";
+                } else {
+                    boolean force = closeMarketDecoder.force() == BooleanType.T;
+                    response = engine.close(force);
+                    log.info("Market closed: symbolId={} force={}", symbolId, force);
+                }
+                emitMatchResult(symbolId, response);
+                notifyPendingCommand(closeMarketDecoder.uuidHigh(), closeMarketDecoder.uuidLow(), closeRejectReason);
+                break;
+            }
+
+            default:
+                log.warn("Unknown templateId={}, skipping", templateId);
+                break;
+        }
+
         nextMatchSeq++;
     }
 
@@ -115,7 +246,7 @@ public class MatchClusteredService implements ClusteredService {
     @Override
     public void onTerminate(Cluster cluster) {
         log.info("MatchClusteredService terminating");
-        matchResultEgress.shutdown();
+        matchResultSideChannel.shutdown();
     }
 
     @Override
@@ -129,16 +260,19 @@ public class MatchClusteredService implements ClusteredService {
         for (Map.Entry<Integer, MatchEngine> entry : engines.entrySet()) {
             int symbolId = entry.getKey();
             MatchEngine engine = entry.getValue();
-            MarketConfig cfg = engine.getBook().getMarketConfig();
+            MatchMarketConfig cfg = engine.getBook().getMatchMarketConfig();
+            String symbolName = symbolNames.getOrDefault(symbolId, cfg.getSymbolName());
 
             int symbolLen = sbeEncoder.encodeSnapshotSymbolHeader(
                     symbolId,
                     engine.getBook().getOrderCount(),
-                    engine.getBook().getAppliedMarketConfigVersion(),
+                    engine.getBook().getAppliedMatchMarketConfigVersion(),
                     cfg.getPriceScale(),
                     cfg.getQtyScale(),
                     cfg.getMinQty(),
                     cfg.getMinTradeQuoteAmount(),
+                    engine.isClosed(),
+                    symbolName,
                     encodingBuffer, 0);
             offerToPublication(snapshotPublication, encodingBuffer, 0, symbolLen);
 
@@ -184,22 +318,32 @@ public class MatchClusteredService implements ClusteredService {
                 case SnapshotSymbolHeaderDecoder.TEMPLATE_ID: {
                     symbolHeaderDecoder.wrap(buffer, bodyOffset, blockLength, schemaVersion);
                     int symbolId = (int) symbolHeaderDecoder.symbolId();
-                    String name = symbolNames.getOrDefault(symbolId, "symbol-" + symbolId);
+                    String symbolName = symbolHeaderDecoder.symbolName();
+                    if (symbolName == null || symbolName.isEmpty()) {
+                        symbolName = "symbol-" + symbolId;
+                    }
+                    boolean closed = symbolHeaderDecoder.closed() == BooleanType.T;
 
                     BigDecimal minQty = Decimal64Codec.decode(symbolHeaderDecoder.minQty());
                     BigDecimal minTradeQuoteAmount = Decimal64Codec.decode(symbolHeaderDecoder.minTradeQuoteAmount());
-                    MarketConfig cfg = MarketConfig.builder()
-                            .symbol(name)
+                    MatchMarketConfig cfg = MatchMarketConfig.builder()
+                            .symbolId(symbolId)
+                            .symbolName(symbolName)
                             .priceScale(symbolHeaderDecoder.priceScale())
                             .qtyScale(symbolHeaderDecoder.qtyScale())
                             .minQty(minQty)
                             .minTradeQuoteAmount(minTradeQuoteAmount)
                             .build();
                     long configVersion = symbolHeaderDecoder.appliedConfigVersion();
+                    String finalSymbolName = symbolName;
                     MatchEngine engine = engines.computeIfAbsent(symbolId,
-                            id -> createEngine(name, cfg));
-                    engine.getBook().applyMarketConfig(cfg, configVersion);
-                    log.debug("Restored symbol: symbolId={} name={}", symbolId, name);
+                            id -> new MatchEngine(finalSymbolName, cfg, arrayStackBookOrder));
+                    engine.getBook().applyMatchMarketConfig(cfg, configVersion);
+                    if (closed) {
+                        engine.close(false);
+                    }
+                    symbolNames.put(symbolId, symbolName);
+                    log.debug("Restored symbol: symbolId={} name={} closed={}", symbolId, symbolName, closed);
                     break;
                 }
                 case SnapshotBookOrderDecoder.TEMPLATE_ID: {
@@ -261,10 +405,49 @@ public class MatchClusteredService implements ClusteredService {
                 trades, finishOrders,
                 encodingBuffer, 0);
 
-        matchResultEgress.emitEncodedMatchResult(nextMatchSeq, encodingBuffer, 0, encodedLength);
+        matchResultSideChannel.emitEncodedMatchResult(nextMatchSeq, encodingBuffer, 0, encodedLength);
     }
 
-    private void offerToPublication(ExclusivePublication publication, MutableDirectBuffer buffer, int offset, int length) {
+    /**
+     * 若命令携带有效 UUID（非 0,0），则唤醒对应的 HTTP 等待线程。
+     * Follower 节点的 pendingCommandRegistry 中没有该 UUID 时静默忽略。
+     *
+     * @param uuidHigh     UUID 高 64 位
+     * @param uuidLow      UUID 低 64 位
+     * @param rejectReason 非 null 表示执行失败，null 表示成功
+     */
+    private void notifyPendingCommand(long uuidHigh, long uuidLow, String rejectReason) {
+        if (uuidHigh == 0L && uuidLow == 0L) {
+            return;
+        }
+        UUID uuid = new UUID(uuidHigh, uuidLow);
+        if (rejectReason == null) {
+            pendingCommandRegistry.tryComplete(uuid.toString(), new AdminCommandResult(true, "OK"));
+        } else {
+            pendingCommandRegistry.tryComplete(uuid.toString(), new AdminCommandResult(false, rejectReason));
+        }
+    }
+
+    private static MatchResponse rejectUnknownSymbol(int symbolId) {
+        log.warn("Rejected order for unknown symbolId={}", symbolId);
+        return MatchResponse.builder()
+                .taker(null)
+                .trades(Collections.emptyList())
+                .finishOrders(Collections.emptyList())
+                .build();
+    }
+
+    private static MatchResponse rejectMarketClosed(int symbolId) {
+        log.warn("Rejected order for closed market symbolId={}", symbolId);
+        return MatchResponse.builder()
+                .taker(null)
+                .trades(Collections.emptyList())
+                .finishOrders(Collections.emptyList())
+                .build();
+    }
+
+    private void offerToPublication(ExclusivePublication publication, MutableDirectBuffer buffer,
+                                    int offset, int length) {
         long result;
         do {
             result = publication.offer(buffer, offset, length);
@@ -274,20 +457,4 @@ public class MatchClusteredService implements ClusteredService {
         } while (result < 0);
         idleStrategy.reset();
     }
-
-    private MatchEngine createDefaultEngine(int symbolId) {
-        String name = symbolNames.getOrDefault(symbolId, "symbol-" + symbolId);
-        log.warn("Creating default engine for unknown symbolId={} name={}; " +
-                "send UpdateMarketCommand to configure properly", symbolId, name);
-        return createEngine(name, MarketConfig.defaultFor(name));
-    }
-
-    private MatchEngine createEngine(String name, MarketConfig config) {
-        return new MatchEngine(name, config, arrayStackBookOrder);
-    }
-
-    public void registerSymbol(int symbolId, String name) {
-        symbolNames.put(symbolId, name);
-    }
-
 }

@@ -36,12 +36,6 @@
 
         <!-- ═══════════════════ Enumerations ═══════════════════ -->
 
-        <enum name="CommandType" encodingType="uint8">
-            <validValue name="PUSH_ORDER">0</validValue>
-            <validValue name="CANCEL_ORDER">1</validValue>
-            <validValue name="UPDATE_MARKET">2</validValue>
-        </enum>
-
         <enum name="Side" encodingType="uint8">
             <validValue name="BUY">0</validValue>
             <validValue name="SELL">1</validValue>
@@ -82,6 +76,10 @@
             <validValue name="POST_ONLY_WOULD_CROSS">10</validValue>
             <validValue name="FOK_NOT_FILLABLE">11</validValue>
             <validValue name="UNKNOWN">12</validValue>
+            <validValue name="UNKNOWN_SYMBOL">13</validValue>
+            <validValue name="MARKET_CLOSED">14</validValue>
+            <validValue name="SYMBOL_ALREADY_EXISTS">15</validValue>
+            <validValue name="CONFIG_VERSION_STALE">16</validValue>
         </enum>
 
         <enum name="BooleanType" encodingType="uint8">
@@ -116,8 +114,8 @@
         <field name="shardId"  id="4" type="int32"/>
     </sbe:message>
 
-    <!-- templateId=3: UpdateMarketCommand -->
-    <sbe:message name="UpdateMarketCommand" id="3" description="Update symbol market rules">
+    <!-- templateId=3: UpdateMarketCommand (admin HTTP → match-engine) -->
+    <sbe:message name="UpdateMarketCommand" id="3" description="Update symbol market rules (admin)">
         <field name="symbolId"             id="1"  type="uint32"/>
         <field name="priceScale"           id="2"  type="int32"/>
         <field name="qtyScale"             id="3"  type="int32"/>
@@ -125,6 +123,30 @@
         <field name="minTradeQuoteAmount"  id="5"  type="Decimal64"/>
         <field name="configVersion"        id="6"  type="int64"/>
         <field name="force"                id="7"  type="BooleanType"/>
+        <field name="uuidHigh"             id="8"  type="int64"/>
+        <field name="uuidLow"              id="9"  type="int64"/>
+    </sbe:message>
+
+    <!-- templateId=4: OpenMarketCommand (admin HTTP → match-engine) -->
+    <sbe:message name="OpenMarketCommand" id="4" description="List new symbol (admin)">
+        <field name="symbolId"             id="1"  type="uint32"/>
+        <field name="priceScale"           id="2"  type="int32"/>
+        <field name="qtyScale"             id="3"  type="int32"/>
+        <field name="minQty"               id="4"  type="Decimal64"/>
+        <field name="minTradeQuoteAmount"  id="5"  type="Decimal64"/>
+        <field name="configVersion"        id="6"  type="int64"/>
+        <field name="uuidHigh"             id="7"  type="int64"/>
+        <field name="uuidLow"              id="8"  type="int64"/>
+        <data  name="symbolName"           id="9"  type="varAsciiEncoding"/>
+    </sbe:message>
+
+    <!-- templateId=5: CloseMarketCommand (admin HTTP → match-engine) -->
+    <sbe:message name="CloseMarketCommand" id="5" description="Delist symbol (admin)">
+        <field name="symbolId"      id="1"  type="uint32"/>
+        <field name="configVersion" id="2"  type="int64"/>
+        <field name="force"         id="3"  type="BooleanType"/>
+        <field name="uuidHigh"      id="4"  type="int64"/>
+        <field name="uuidLow"       id="5"  type="int64"/>
     </sbe:message>
 
     <!-- ═══════════════════ Egress: MatchResult ═══════════════════ -->
@@ -197,6 +219,8 @@
         <field name="qtyScale"            id="5" type="int32"/>
         <field name="minQty"              id="6" type="Decimal64"/>
         <field name="minTradeQuoteAmount" id="7" type="Decimal64"/>
+        <field name="closed"              id="8" type="BooleanType"/>
+        <data  name="symbolName"          id="9" type="varAsciiEncoding"/>
     </sbe:message>
 
 </sbe:messageSchema>

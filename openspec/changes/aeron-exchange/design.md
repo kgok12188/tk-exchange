@@ -72,8 +72,11 @@
 - **Decision**: match-engine 内部改为单线程撮合。`ClusteredService.onSessionMessage()` 在 Cluster 共识线程上执行，按 `symbolId` 路由到对应的 `MatchEngine` 实例。删除 MatchSlot / MatchManager / pendingSlotEvents / Disruptor 等多线程调度组件。
 - **内部结构**:
   - `engines: Map<Integer, MatchEngine>` — symbolId → MatchEngine（每个 MatchEngine 持有一个 OrderBook）。
-  - `onSessionMessage(session, buffer)` → decode SBE → `engines.get(symbolId).process(command)` → encode MatchResult。
-  - 运行时上币：通过 `UpdateMarketCommand` 指令添加新 symbol（走 Raft log，所有节点一致）。
+  - `onSessionMessage(session, buffer)` → 按 templateId 分发 → 订单类交 `engines.get(symbolId).process(command)` / admin 类管理引擎 → encode MatchResult。
+  - 上币：`OpenMarketCommand`（templateId=4）携带完整 `MatchMarketConfig` + `symbolName`，通过 Raft log 在所有节点创建 MatchEngine。
+  - 下币：`CloseMarketCommand`（templateId=5）标记引擎为 `closed`，拒绝后续下单。
+  - 配置更新：`UpdateMarketCommand`（templateId=3）更新已有引擎的撮合规则。
+  - 三种 admin 命令均走 Raft，全节点一致执行，产出空 MatchResult，`nextMatchSeq++`。
 - **Rationale**:
   - Aeron Cluster 的 `ClusteredService` 天然是单线程回调模型，与多 slot 不兼容。
   - 单线程消除了所有并发复杂度（slot 事件队列、跨线程投递、per-slot isMaster 等）。
@@ -103,10 +106,10 @@
 - **示例**: price = 64523.75 → mantissa = 6452375, exponent = -2。
 - **Rationale**: 自描述（不依赖外部 scale 约定）、精度充足（int64 mantissa）、SBE 标准做法。不选择 fixed-scale int64 方案，因为不同 symbol 的 scale 不同且 scale 会变更。
 
-#### 4.2 symbol 表示：symbolId (uint32)
+#### 4.2 symbol 表示：symbolId (uint32) + symbolName (一次性传输)
 
-- **Decision**: wire 协议中 symbol 使用 `symbolId: uint32`，不传字符串。symbolId ↔ symbol 映射通过 `UpdateMarketCommand` 同步。
-- **Rationale**: 定长 4 bytes，避免变长字符串在 SBE 消息中的性能开销；交易对配置本来就需要管理，symbolId 是自然延伸。
+- **Decision**: 订单流（PushOrderCommand / CancelOrderCommand）及 UpdateMarketCommand 只传 `symbolId: uint32`。`symbolName` 仅随 `OpenMarketCommand`（上币时）通过 `varAscii` 字段一次性写入 Raft log，同时存入快照（`SnapshotSymbolHeader.symbolName`）。引擎启动后内存中维护 `Map<Integer, String> symbolNames`，重启从快照恢复，不依赖外部注入。
+- **Rationale**: 高频订单流消息定长 4 bytes，避免变长字符串的性能开销；symbolName 与 symbolId 的绑定通过 Raft log（上币）+ 快照（恢复）保证全节点一致。废弃 `registerSymbol()` 外部注入方法。
 
 #### 4.3 枚举类型
 
@@ -114,12 +117,14 @@ SBE 中定义以下枚举（uint8 编码）：
 
 | 枚举 | 值 |
 |------|-----|
-| `CommandType` | PUSH_ORDER(0), CANCEL_ORDER(1), UPDATE_MARKET(2) |
 | `Side` | BUY(0), SELL(1) |
 | `PriceType` | LIMIT(0), MARKET(1), LIMIT_MAKER(2) |
 | `TimeInForce` | GTC(0), IOC(1), FOK(2) |
 | `FinishStatus` | COMPLETED(0), CANCEL(1), PART_CANCEL(2), EXCEPTION(3), REJECT(4), POST_ONLY_REJECT(5) |
-| `RejectReason` | NONE(0), INVALID_ORDER_ID(1), DUPLICATE_ORDER_ID(2), ORDER_EXPIRED(3), INVALID_PRICE_TYPE(4), INVALID_PRICE(5), PRICE_TICK_INVALID(6), INVALID_QUANTITY(7), INVALID_NOTIONAL(8), INVALID_TIME_IN_FORCE(9), POST_ONLY_WOULD_CROSS(10), FOK_NOT_FILLABLE(11), UNKNOWN(255) |
+| `RejectReason` | NONE(0), INVALID_ORDER_ID(1), DUPLICATE_ORDER_ID(2), ORDER_EXPIRED(3), INVALID_PRICE_TYPE(4), INVALID_PRICE(5), PRICE_TICK_INVALID(6), INVALID_QUANTITY(7), INVALID_NOTIONAL(8), INVALID_TIME_IN_FORCE(9), POST_ONLY_WOULD_CROSS(10), FOK_NOT_FILLABLE(11), UNKNOWN(12), UNKNOWN_SYMBOL(13), MARKET_CLOSED(14), SYMBOL_ALREADY_EXISTS(15), CONFIG_VERSION_STALE(16) |
+| `BooleanType` | F(0), T(1) |
+
+> `CommandType` 枚举已删除：消息路由完全由 `messageHeader.templateId` 区分，无需重复的命令类型字段。
 
 #### 4.4 SBE 消息定义
 
@@ -129,15 +134,17 @@ SBE 中定义以下枚举（uint8 编码）：
 |------|-----|------|------|
 | **PushOrderCommand** | 1 | trading-server → match-engine | symbolId(u32), orderId(i64), uid(i64), shardId(i32), marketId(i64), side(Side), priceType(PriceType), timeInForce(TimeInForce), price(Decimal64), volume(Decimal64), amount(Decimal64), createTime(i64) |
 | **CancelOrderCommand** | 2 | trading-server → match-engine | symbolId(u32), orderId(i64), uid(i64), shardId(i32) |
-| **UpdateMarketCommand** | 3 | trading-server → match-engine | symbolId(u32), priceScale(i32), qtyScale(i32), minQty(Decimal64), minTradeQuoteAmount(Decimal64), configVersion(i64), force(BooleanType) |
-| **MatchResult** | 10 | match-engine → consumers | matchSeq(i64), symbolId(u32), takerUid(i64), takerOrderId(i64), takerShardId(i32); **group trades**: index(i64), price(Decimal64), volume(Decimal64), buyUid(i64), sellUid(i64), buyOrderId(i64), sellOrderId(i64), buyShardId(i32), sellShardId(i32), takerOrderId(i64), takerUid(i64); **group finishOrders**: uid(i64), orderId(i64), status(FinishStatus), rejectReason(RejectReason), leaveAmount(Decimal64), leaveVolume(Decimal64), shardId(i32) |
+| **UpdateMarketCommand** | 3 | admin-api → match-engine | symbolId(u32), priceScale(i32), qtyScale(i32), minQty(Decimal64), minTradeQuoteAmount(Decimal64), configVersion(i64), force(BooleanType) |
+| **OpenMarketCommand** | 4 | admin-api → match-engine | symbolId(u32), priceScale(i32), qtyScale(i32), minQty(Decimal64), minTradeQuoteAmount(Decimal64), configVersion(i64), **symbolName(varAscii)** |
+| **CloseMarketCommand** | 5 | admin-api → match-engine | symbolId(u32), configVersion(i64), force(BooleanType) |
+| **MatchResult** | 10 | match-engine → consumers (MDC) | matchSeq(i64), symbolId(u32), takerUid(i64), takerOrderId(i64), takerShardId(i32); **group trades**: index(i64), price(Decimal64), volume(Decimal64), buyUid(i64), sellUid(i64), buyOrderId(i64), sellOrderId(i64), buyShardId(i32), sellShardId(i32), takerOrderId(i64), takerUid(i64); **group finishOrders**: uid(i64), orderId(i64), status(FinishStatus), rejectReason(RejectReason), leaveAmount(Decimal64), leaveVolume(Decimal64), shardId(i32) |
 
 **快照消息**（Cluster onTakeSnapshot / onLoadSnapshot 使用）：
 
 | 消息 | ID | 用途 | 字段 |
 |------|-----|------|------|
 | **SnapshotHeader** | 20 | 快照头 | nextMatchSeq(i64), symbolCount(i32) |
-| **SnapshotSymbolHeader** | 22 | 每个 symbol 的快照头 | symbolId(u32), orderCount(i32), nextSeq(i64) |
+| **SnapshotSymbolHeader** | 22 | 每个 symbol 的快照头 | symbolId(u32), orderCount(i32), appliedConfigVersion(i64), priceScale(i32), qtyScale(i32), minQty(Decimal64), minTradeQuoteAmount(Decimal64), **closed(BooleanType)**, **symbolName(varAscii)** |
 | **SnapshotBookOrder** | 21 | 每个挂单 | symbolId(u32), orderId(i64), uid(i64), shardId(i32), side(Side), price(Decimal64), volume(Decimal64), remainingVolume(Decimal64), amount(Decimal64), remainingAmount(Decimal64), seq(i64) |
 
 **不再需要作为 SBE 消息的类型**:
@@ -166,6 +173,12 @@ SBE 中定义以下枚举（uint8 编码）：
   - 无影响（参数变更但存量挂单都合规）→ 空 MatchResult。
   - force=false 且存在不合规挂单 → 拒绝应用，空 MatchResult。
   - force=true 且触发撤单 → MatchResult 包含被强制撤销的 finishOrders。
+- **OPEN_MARKET / CLOSE_MARKET 的输出场景**:
+  - 上币成功（新引擎创建）→ 空 MatchResult。
+  - 上币幂等（symbolId 已存在）→ 空 MatchResult（不报错，幂等处理）。
+  - 下币成功（force=false，无挂单）→ 空 MatchResult。
+  - 下币 force=true 触发撤单 → MatchResult 包含被强制撤销的 finishOrders（CANCEL）。
+  - 无论成功与否，所有 admin 命令统一执行 `nextMatchSeq++`，保证序列不断。
 - **不暴露 orderReqOffset**: Raft log position 是 Cluster 内部实现细节，不泄露到输出协议。matchSeq 是唯一的外部排序标识。
 - **Rationale**:
   - 消费者间隙检测：收到 matchSeq N 后下一条必须是 N+1，否则告警。无歧义。
@@ -587,6 +600,106 @@ trading-server 的 Aeron Cluster 快照需持久化以下状态：
 | `SlotContext` / `TradingAccount` | 保留 | 内存层 + 共识层各持有独立副本 |
 | `CommandRouter` / Handler | 重构 | REST Controller → RingBuffer → Raft log |
 | Spring Boot / REST | **保留** | 继续作为 open-api 接入层 |
+
+### 13. Symbol 生命周期：上币、下币、配置更新
+
+#### 13.1 Symbol 状态机
+
+Symbol 在 match-engine 内有三个状态：
+
+```
+[NOT_EXIST] ──OpenMarketCommand(4)──► [ACTIVE] ──CloseMarketCommand(5)──► [CLOSED]
+                                          │
+                                   UpdateMarketCommand(3)
+                                    （原地更新撮合规则）
+```
+
+| 状态 | 说明 | 可接受命令 |
+|------|------|-----------|
+| NOT_EXIST | symbolId 不在 engines map | 仅 OpenMarketCommand |
+| ACTIVE | 正常撮合中 | PushOrder / CancelOrder / UpdateMarket / CloseMarket |
+| CLOSED | 已下币，引擎标记 closed | 无（下单返回 MARKET_CLOSED；CloseMarket 幂等） |
+
+#### 13.2 `MatchMarketConfig`（重命名自 `MarketConfig`）
+
+`com.tk.protocol.dto.MarketConfig` → 重命名为 `com.tk.protocol.dto.MatchMarketConfig`。
+
+| MatchMarketConfig 字段 | 来源（entity.MarketConfig） | 说明 |
+|------------------------|----------------------------|------|
+| symbolId | entity.id | MySQL auto-increment PK，match-engine 全局 symbolId |
+| symbolName | entity.symbol | 如 "BTC_USDT"，仅 OpenMarketCommand 携带 |
+| priceScale | entity.priceScale | 价格小数位 |
+| qtyScale | entity.numScale | 数量小数位 |
+| minQty | entity.numMin | 最小委托量 |
+| minTradeQuoteAmount | entity.minTradeQuoteAmount | 最小名义金额（entity 新增字段） |
+
+转换入口：`entity.MarketConfig.toMatchMarketConfig()` 静态工厂方法，由 admin-api 调用后发出 SBE 命令。
+
+`MarketUpdatePayload` DTO 同步删除（不再需要包装层）。
+
+#### 13.3 `onSessionMessage` 分发逻辑
+
+```
+switch (templateId) {
+
+  case 1 (PushOrderCommand) / case 2 (CancelOrderCommand):
+      engine = engines.get(symbolId)
+      if (engine == null)        → rejectResponse(UNKNOWN_SYMBOL)
+      else if (engine.isClosed()) → rejectResponse(MARKET_CLOSED)
+      else                        → engine.process(cmd, nextMatchSeq, timestamp)
+      emitMatchResult(symbolId, response)
+
+  case 3 (UpdateMarketCommand):
+      engine = engines.get(symbolId)
+      if (engine != null && !engine.isClosed())
+          engine.applyConfig(cfg, configVersion, force)
+      emitMatchResult(symbolId, null)           // 空 MatchResult
+
+  case 4 (OpenMarketCommand):
+      if (!engines.containsKey(symbolId))       // 幂等：已存在则跳过
+          engines.put(symbolId, createEngine(symbolName, cfg))
+          symbolNames.put(symbolId, symbolName)
+      emitMatchResult(symbolId, null)           // 空 MatchResult
+
+  case 5 (CloseMarketCommand):
+      engine = engines.get(symbolId)
+      if (engine != null && !engine.isClosed())
+          engine.close(force)                   // force=true 先撤所有挂单
+      emitMatchResult(symbolId, null)           // 空 MatchResult（含撤单 finishOrders）
+
+  nextMatchSeq++   // 所有命令类型统一递增，序列不断
+}
+```
+
+#### 13.4 快照中的 Symbol 状态恢复
+
+`SnapshotSymbolHeader` 新增两个字段（末尾顺序：固定字段 closed 先，varAscii symbolName 后）：
+
+| 新增字段 | 类型 | 作用 |
+|---------|------|------|
+| `closed` | BooleanType | T = 引擎已关闭，恢复时保持 closed 状态不接单 |
+| `symbolName` | varAscii | 恢复 `symbolNames[symbolId]` 映射，无需外部注入 |
+
+`MatchClusteredService.registerSymbol()` 方法删除；`createDefaultEngine()` 方法删除。
+
+#### 13.5 admin-api 集成路径
+
+```
+MarkerConfigController (admin-api)
+    │
+    ├── 写入 MySQL (entity.MarketConfig)  ← 获得 auto-increment id = symbolId
+    │
+    ├── entity.toMatchMarketConfig()      ← 转换为协议 DTO
+    │
+    └── AeronCluster.offer(SBE OpenMarketCommand)
+            │
+            ▼ Raft log
+        MatchClusteredService.onSessionMessage (全节点执行)
+            │
+            └── emitMatchResult(symbolId, null) → MDC (empty MatchResult)
+```
+
+admin-api 需依赖 `trading-protocol` 模块（SBE 编解码 + `MatchMarketConfig`）。
 
 ## Risks / Trade-offs
 

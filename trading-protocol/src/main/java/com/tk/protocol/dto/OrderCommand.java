@@ -15,9 +15,7 @@ import lombok.NoArgsConstructor;
 public class OrderCommand {
     private CommandType type;
     private String symbol;
-    private OrderPayload pushPayload;   // non-null when type == PUSH_ORDER
+    private OrderPayload pushPayload;    // non-null when type == PUSH_ORDER
     private CancelPayload cancelPayload; // non-null when type == CANCEL_ORDER
-    /** non-null when type == UPDATE_MARKET */
-    private MarketUpdatePayload marketUpdatePayload;
     private Integer schemaVersion;       // optional, for protocol evolution
 }

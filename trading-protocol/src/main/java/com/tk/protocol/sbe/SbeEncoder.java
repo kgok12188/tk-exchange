@@ -1,6 +1,7 @@
 package com.tk.protocol.sbe;
 
 import com.tk.protocol.dto.FinishOrder;
+import com.tk.protocol.dto.MatchMarketConfig;
 import com.tk.protocol.dto.TradeOrder;
 import com.tk.protocol.sbe.generated.*;
 import org.agrona.MutableDirectBuffer;
@@ -114,6 +115,8 @@ public final class SbeEncoder {
                                           int priceScale, int qtyScale,
                                           BigDecimal minQty,
                                           BigDecimal minTradeQuoteAmount,
+                                          boolean closed,
+                                          String symbolName,
                                           MutableDirectBuffer buffer, int offset) {
         headerEncoder.wrap(buffer, offset)
                 .blockLength(SnapshotSymbolHeaderEncoder.BLOCK_LENGTH)
@@ -121,16 +124,20 @@ public final class SbeEncoder {
                 .schemaId(SnapshotSymbolHeaderEncoder.SCHEMA_ID)
                 .version(SnapshotSymbolHeaderEncoder.SCHEMA_VERSION);
 
-        symbolHeaderEncoder.wrap(buffer, offset + headerEncoder.encodedLength())
+        int bodyOffset = offset + headerEncoder.encodedLength();
+        symbolHeaderEncoder.wrap(buffer, bodyOffset)
                 .symbolId(symbolId)
                 .orderCount(orderCount)
                 .appliedConfigVersion(appliedConfigVersion)
                 .priceScale(priceScale)
-                .qtyScale(qtyScale);
+                .qtyScale(qtyScale)
+                .closed(closed ? BooleanType.T : BooleanType.F);
         Decimal64Codec.encode(minQty, symbolHeaderEncoder.minQty());
         Decimal64Codec.encode(minTradeQuoteAmount, symbolHeaderEncoder.minTradeQuoteAmount());
 
-        return headerEncoder.encodedLength() + SnapshotSymbolHeaderEncoder.BLOCK_LENGTH;
+        symbolHeaderEncoder.symbolName((symbolName != null) ? symbolName : "");
+
+        return headerEncoder.encodedLength() + symbolHeaderEncoder.encodedLength();
     }
 
     public int encodeSnapshotBookOrder(int symbolId,
@@ -165,6 +172,96 @@ public final class SbeEncoder {
         return headerEncoder.encodedLength() + SnapshotBookOrderEncoder.BLOCK_LENGTH;
     }
 
+    // ── Admin command encoding ─────────────────────────────────────────────────
+
+    /**
+     * 编码 OpenMarketCommand（上币）到 buffer。
+     *
+     * @param configVersion 配置版本号（由调用方管理）
+     * @return 写入字节数（header + body + vardata）
+     */
+    public int encodeOpenMarketCommand(MatchMarketConfig config, long configVersion,
+                                       long uuidHigh, long uuidLow,
+                                       MutableDirectBuffer buffer, int offset) {
+        OpenMarketCommandEncoder encoder = new OpenMarketCommandEncoder();
+        headerEncoder.wrap(buffer, offset)
+                .blockLength(OpenMarketCommandEncoder.BLOCK_LENGTH)
+                .templateId(OpenMarketCommandEncoder.TEMPLATE_ID)
+                .schemaId(OpenMarketCommandEncoder.SCHEMA_ID)
+                .version(OpenMarketCommandEncoder.SCHEMA_VERSION);
+
+        int bodyOffset = offset + headerEncoder.encodedLength();
+        encoder.wrap(buffer, bodyOffset)
+                .symbolId(config.getSymbolId())
+                .priceScale(config.getPriceScale())
+                .qtyScale(config.getQtyScale())
+                .configVersion(configVersion)
+                .uuidHigh(uuidHigh)
+                .uuidLow(uuidLow);
+        Decimal64Codec.encode(config.getMinQty(), encoder.minQty());
+        Decimal64Codec.encode(config.getMinTradeQuoteAmount(), encoder.minTradeQuoteAmount());
+        encoder.symbolName(config.getSymbolName() != null ? config.getSymbolName() : "");
+
+        return headerEncoder.encodedLength() + encoder.encodedLength();
+    }
+
+    /**
+     * 编码 CloseMarketCommand（下币）到 buffer。
+     *
+     * @return 写入字节数
+     */
+    public int encodeCloseMarketCommand(int symbolId, long configVersion, boolean force,
+                                        long uuidHigh, long uuidLow,
+                                        MutableDirectBuffer buffer, int offset) {
+        CloseMarketCommandEncoder encoder = new CloseMarketCommandEncoder();
+        headerEncoder.wrap(buffer, offset)
+                .blockLength(CloseMarketCommandEncoder.BLOCK_LENGTH)
+                .templateId(CloseMarketCommandEncoder.TEMPLATE_ID)
+                .schemaId(CloseMarketCommandEncoder.SCHEMA_ID)
+                .version(CloseMarketCommandEncoder.SCHEMA_VERSION);
+
+        int bodyOffset = offset + headerEncoder.encodedLength();
+        encoder.wrap(buffer, bodyOffset)
+                .symbolId(symbolId)
+                .configVersion(configVersion)
+                .force(force ? BooleanType.T : BooleanType.F)
+                .uuidHigh(uuidHigh)
+                .uuidLow(uuidLow);
+
+        return headerEncoder.encodedLength() + CloseMarketCommandEncoder.BLOCK_LENGTH;
+    }
+
+    /**
+     * 编码 UpdateMarketCommand（更新配置）到 buffer。
+     *
+     * @param configVersion 配置版本号（由调用方管理）
+     * @return 写入字节数
+     */
+    public int encodeUpdateMarketCommand(MatchMarketConfig config, long configVersion, boolean force,
+                                         long uuidHigh, long uuidLow,
+                                         MutableDirectBuffer buffer, int offset) {
+        UpdateMarketCommandEncoder encoder = new UpdateMarketCommandEncoder();
+        headerEncoder.wrap(buffer, offset)
+                .blockLength(UpdateMarketCommandEncoder.BLOCK_LENGTH)
+                .templateId(UpdateMarketCommandEncoder.TEMPLATE_ID)
+                .schemaId(UpdateMarketCommandEncoder.SCHEMA_ID)
+                .version(UpdateMarketCommandEncoder.SCHEMA_VERSION);
+
+        int bodyOffset = offset + headerEncoder.encodedLength();
+        encoder.wrap(buffer, bodyOffset)
+                .symbolId(config.getSymbolId())
+                .priceScale(config.getPriceScale())
+                .qtyScale(config.getQtyScale())
+                .configVersion(configVersion)
+                .force(force ? BooleanType.T : BooleanType.F)
+                .uuidHigh(uuidHigh)
+                .uuidLow(uuidLow);
+        Decimal64Codec.encode(config.getMinQty(), encoder.minQty());
+        Decimal64Codec.encode(config.getMinTradeQuoteAmount(), encoder.minTradeQuoteAmount());
+
+        return headerEncoder.encodedLength() + UpdateMarketCommandEncoder.BLOCK_LENGTH;
+    }
+
     // ── Enum mappers (DTO → SBE generated) ───────────────────────────────────
 
     private static FinishStatus toSbeFinishStatus(com.tk.protocol.dto.FinishStatus status) {
@@ -194,6 +291,11 @@ public final class SbeEncoder {
             case POST_ONLY_WOULD_CROSS -> RejectReason.POST_ONLY_WOULD_CROSS;
             case FOK_NOT_FILLABLE -> RejectReason.FOK_NOT_FILLABLE;
             case UNKNOWN -> RejectReason.UNKNOWN;
+            case UNKNOWN_SYMBOL -> RejectReason.UNKNOWN_SYMBOL;
+            case MARKET_CLOSED -> RejectReason.MARKET_CLOSED;
+            case SYMBOL_ALREADY_EXISTS -> RejectReason.SYMBOL_ALREADY_EXISTS;
+            case CONFIG_VERSION_STALE -> RejectReason.CONFIG_VERSION_STALE;
+            default -> RejectReason.UNKNOWN;
         };
     }
 

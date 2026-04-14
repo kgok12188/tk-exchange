@@ -1,6 +1,6 @@
 package com.tk.match.engine;
 
-import com.tk.protocol.dto.MarketConfig;
+import com.tk.protocol.dto.MatchMarketConfig;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -21,9 +21,9 @@ public final class MarketRules {
     /**
      * 是否应<strong>拒绝</strong>该委托数量（与字面「合规」相反：{@code true} 表示违反规则，对应 {@link OrderBook#pushOrder} 的 REJECT）。
      * <p>
-     * 规则：低于 {@link MarketConfig#getMinQty()}（若配置为正）、或小数位数超过 {@link MarketConfig#getQtyScale()}（若 {@code qtyScale >= 0}）。
+     * 规则：低于 {@link MatchMarketConfig#getMinQty()}（若配置为正）、或小数位数超过 {@link MatchMarketConfig#getQtyScale()}（若 {@code qtyScale >= 0}）。
      */
-    public static boolean shouldRejectQuantity(BigDecimal volume, MarketConfig config) {
+    public static boolean shouldRejectQuantity(BigDecimal volume, MatchMarketConfig config) {
         if (volume == null || volume.compareTo(ZERO) <= 0 || config == null) {
             return true;
         }
@@ -40,7 +40,7 @@ public final class MarketRules {
     /**
      * 限价单价格小数位不超过 priceScale（市价可为 null）。
      */
-    public static boolean isPriceCompliant(BigDecimal price, MarketConfig config) {
+    public static boolean isPriceCompliant(BigDecimal price, MatchMarketConfig config) {
         if (price == null) {
             return true;
         }
@@ -51,10 +51,10 @@ public final class MarketRules {
     }
 
     /**
-     * 在给定单价下，quote 预算理论上最多可买到的 base（先按 16 位除法向下取整，再按 {@link MarketConfig#getQtyScale()} 向下取整）。
-     * 若结果低于 {@link MarketConfig#getMinQty()}（配置为正时），返回 0（无法按规则形成有效成交切片）。
+     * 在给定单价下，quote 预算理论上最多可买到的 base（先按 16 位除法向下取整，再按 {@link MatchMarketConfig#getQtyScale()} 向下取整）。
+     * 若结果低于 {@link MatchMarketConfig#getMinQty()}（配置为正时），返回 0（无法按规则形成有效成交切片）。
      */
-    public static BigDecimal maxMatchableVolume(BigDecimal amount, BigDecimal price, MarketConfig config) {
+    public static BigDecimal maxMatchableVolume(BigDecimal amount, BigDecimal price, MatchMarketConfig config) {
         if (amount == null || price == null || amount.compareTo(ZERO) <= 0 || price.compareTo(ZERO) <= 0) {
             return ZERO;
         }
@@ -71,7 +71,7 @@ public final class MarketRules {
     /**
      * 单笔撮合成交量是否允许（正数且不满足 {@link #shouldRejectQuantity} 的拒绝条件）。
      */
-    public static boolean allowsMatchTradeVolume(BigDecimal volume, MarketConfig config) {
+    public static boolean allowsMatchTradeVolume(BigDecimal volume, MatchMarketConfig config) {
         if (volume == null || volume.compareTo(ZERO) <= 0) {
             return false;
         }

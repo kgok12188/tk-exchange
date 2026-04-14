@@ -16,6 +16,14 @@ public enum RejectReason {
     INVALID_TIME_IN_FORCE,
     POST_ONLY_WOULD_CROSS,
     FOK_NOT_FILLABLE,
-    UNKNOWN
+    UNKNOWN,
+    /** symbolId 在 match-engine 中不存在（未上币）。 */
+    UNKNOWN_SYMBOL,
+    /** symbol 已下币，拒绝新订单。 */
+    MARKET_CLOSED,
+    /** OpenMarketCommand：symbolId 已存在。 */
+    SYMBOL_ALREADY_EXISTS,
+    /** UpdateMarketCommand / CloseMarketCommand：configVersion 过旧。 */
+    CONFIG_VERSION_STALE
 }
 

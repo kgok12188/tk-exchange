@@ -30,7 +30,7 @@ public class LimitOrderMatcher implements OrderMatcher {
     public MatchResult match(BookOrder takerOrder, long orderReqOffset) {
         List<TradeOrder> trades = new ArrayList<>(4);
         List<FinishOrder> finishes = new ArrayList<>(4);
-        int scale = orderBook.getMarketConfig().getPriceScale();
+        int scale = orderBook.getMatchMarketConfig().getPriceScale();
 
         OppositeSideWalk walk = OppositeSideWalk.forTaker(takerOrder);
         long takerTicks = takerOrder.getPriceTicks();
@@ -66,10 +66,10 @@ public class LimitOrderMatcher implements OrderMatcher {
             return MatchResult.of(Collections.emptyList(), Collections.singletonList(MatchSupport.finishOrder(taker, FinishStatus.REJECT, taker.getRemainingVolume(), RejectReason.INVALID_PRICE)));
         }
         BigDecimal vol = taker.getRemainingVolume();
-        if (MarketRules.shouldRejectQuantity(vol, orderBook.getMarketConfig())) {
+        if (MarketRules.shouldRejectQuantity(vol, orderBook.getMatchMarketConfig())) {
             return MatchResult.of(Collections.emptyList(), Collections.singletonList(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.INVALID_QUANTITY)));
         }
-        if (!MarketRules.isPriceCompliant(taker.getPrice(), orderBook.getMarketConfig())) {
+        if (!MarketRules.isPriceCompliant(taker.getPrice(), orderBook.getMatchMarketConfig())) {
             return MatchResult.of(Collections.emptyList(), Collections.singletonList(MatchSupport.finishOrder(taker, FinishStatus.REJECT, vol, RejectReason.PRICE_TICK_INVALID)));
         }
         return null;

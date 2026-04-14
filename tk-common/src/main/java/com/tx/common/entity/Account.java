@@ -32,6 +32,7 @@ public class Account {
     /**
      * 创建一个字段逐一复制的副本。
      */
+    @Override
     public Account clone() {
         Account copy = new Account();
         copy.setId(this.id);

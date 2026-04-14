@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: tk-admin-api
+
+# match-engine admin HTTP 地址（各节点均可接受，内部路由到 Leader）
+match-engine:
+  admin-url: ${MATCH_ENGINE_ADMIN_URL:http://localhost:8090}

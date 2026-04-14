@@ -33,17 +33,17 @@ public final class MarketOrderMatcher implements OrderMatcher {
     public MatchResult match(BookOrder takerOrder, long orderReqOffset) {
         List<TradeOrder> trades = new ArrayList<>(4);
         List<FinishOrder> finishes = new ArrayList<>(4);
-        int scale = orderBook.getMarketConfig().getPriceScale();
+        int scale = orderBook.getMatchMarketConfig().getPriceScale();
 
         OppositeSideWalk walk = OppositeSideWalk.forTaker(takerOrder);
 
         Long oppositeTicks = walk.firstPrice(orderBook);
-        while (oppositeTicks != null && marketTakerHasRemaining(takerOrder, orderBook.getMarketConfig(), orderBook, scale)) {
+        while (oppositeTicks != null && marketTakerHasRemaining(takerOrder, orderBook.getMatchMarketConfig(), orderBook, scale)) {
             PriceLevel level = walk.level(orderBook, oppositeTicks);
             if (level == null) {
                 break;
             }
-            boolean continueToNextPrice = matchMarketAtPriceLevel(orderBook, takerOrder, orderReqOffset, oppositeTicks, scale, orderBook.getMarketConfig(), level, trades, finishes);
+            boolean continueToNextPrice = matchMarketAtPriceLevel(orderBook, takerOrder, orderReqOffset, oppositeTicks, scale, orderBook.getMatchMarketConfig(), level, trades, finishes);
             walk.removeLevelIfEmpty(orderBook, oppositeTicks);
             if (!continueToNextPrice) {
                 break;
@@ -51,7 +51,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
             oppositeTicks = walk.nextOppositePrice(orderBook, oppositeTicks);
         }
 
-        if (marketTakerHasRemaining(takerOrder, orderBook.getMarketConfig(), orderBook, scale)) {
+        if (marketTakerHasRemaining(takerOrder, orderBook.getMatchMarketConfig(), orderBook, scale)) {
             finishes.add(MatchSupport.finishOrder(takerOrder, FinishStatus.PART_CANCEL, takerOrder.getRemainingVolume(), takerOrder.getRemainingAmount()));
         } else {
             finishes.add(MatchSupport.finishOrder(takerOrder, FinishStatus.COMPLETED, takerOrder.getRemainingVolume(), takerOrder.getRemainingAmount()));
@@ -61,7 +61,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
 
     @Override
     public MatchResult validate(BookOrder takerOrder) {
-        MarketConfig mc = orderBook.getMarketConfig();
+        MatchMarketConfig mc = orderBook.getMatchMarketConfig();
         if (takerOrder.isSideBuy()) {
             return validateMarketBuy(takerOrder, mc);
         } else {
@@ -69,7 +69,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
         }
     }
 
-    private static MatchResult validateMarketBuy(BookOrder taker, MarketConfig mc) {
+    private static MatchResult validateMarketBuy(BookOrder taker, MatchMarketConfig mc) {
         BigDecimal amount = taker.getRemainingAmount() != null ? taker.getRemainingAmount() : taker.getAmount();
         if (amount == null || amount.compareTo(mc.getMinTradeQuoteAmount()) < 0) {
             BigDecimal leave = taker.getVolume() != null ? taker.getVolume() : ZERO;
@@ -85,7 +85,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
         return null;
     }
 
-    private static MatchResult validateMarketSell(BookOrder taker, MarketConfig mc) {
+    private static MatchResult validateMarketSell(BookOrder taker, MatchMarketConfig mc) {
         if (taker.getVolume() == null || taker.getVolume().compareTo(mc.getMinQty()) <= 0) {
             BigDecimal leave = taker.getVolume() != null ? taker.getVolume() : ZERO;
             return MatchResult.of(Collections.emptyList(), Collections.singletonList(MatchSupport.finishOrder(taker, FinishStatus.REJECT, leave, taker.getAmount(), RejectReason.INVALID_QUANTITY)));
@@ -97,9 +97,9 @@ public final class MarketOrderMatcher implements OrderMatcher {
     }
 
     /**
-     * 市价 taker 是否仍可继续吃单（含 {@link MarketConfig#getMinTradeQuoteAmount()}：剩余 quote 名义 &lt; 阈值则视为不可再成交）。
+     * 市价 taker 是否仍可继续吃单（含 {@link MatchMarketConfig#getMinTradeQuoteAmount()}：剩余 quote 名义 &lt; 阈值则视为不可再成交）。
      */
-    static boolean marketTakerHasRemaining(BookOrder taker, MarketConfig marketConfig, OrderBook book, int priceScale) {
+    static boolean marketTakerHasRemaining(BookOrder taker, MatchMarketConfig marketConfig, OrderBook book, int priceScale) {
         if (taker.isSideBuy()) {
             if (taker.getRemainingAmount() == null || taker.getRemainingAmount().compareTo(marketConfig.getMinTradeQuoteAmount()) < 0) {
                 return false;
@@ -119,7 +119,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
      * @return {@code false}：与队首 maker 无法形成合规成交切片（{@code fill <= 0}），责任在 taker 侧预算/规则；maker 已入簿即满足挂单规则，不撤 maker，并<strong>结束整单 IOC</strong>（不再尝试更差价）。{@code true}：可继续外层扫下一价位。
      */
     private static boolean matchMarketAtPriceLevel(OrderBook book, BookOrder taker, long orderReqOffset, long oppositeTicks, int scale, //
-                                                   MarketConfig marketConfig, PriceLevel level, List<TradeOrder> trades, List<FinishOrder> finishes) {
+                                                   MatchMarketConfig marketConfig, PriceLevel level, List<TradeOrder> trades, List<FinishOrder> finishes) {
         BigDecimal levelPriceDecimal = PriceCodec.decode(oppositeTicks, scale);
         while (!level.isEmpty() && marketTakerHasRemaining(taker, marketConfig, book, scale)) {
             BookOrder makerOrder = level.peekFirst();
@@ -132,7 +132,7 @@ public final class MarketOrderMatcher implements OrderMatcher {
         return true;
     }
 
-    private static BigDecimal computeMarketFill(BookOrder taker, BookOrder makerOrder, BigDecimal levelPriceDecimal, MarketConfig marketConfig) {
+    private static BigDecimal computeMarketFill(BookOrder taker, BookOrder makerOrder, BigDecimal levelPriceDecimal, MatchMarketConfig marketConfig) {
         BigDecimal makerRemainingVolume = makerOrder.getRemainingVolume();
         if (taker.isSideBuy()) {
             BigDecimal spend = taker.getRemainingAmount();

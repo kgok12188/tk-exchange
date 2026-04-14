@@ -17,20 +17,19 @@ import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.YieldingIdleStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
 
 import java.util.Collections;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
 /**
- * MatchResult 出口：仅依赖 {@link MdcEgressConfig}，所有 Aeron 资源均在 MDC MediaDriver 上。
- * 通过 {@code aeron-spy:} + {@link SourceLocation#LOCAL} 零拷贝录制 publication 流。
+ * MatchResult 出口：MDC publication + 同 driver 上 {@code aeron-spy:} LOCAL 录制；dedup 依赖 Archive 回放。
  */
-@Component
-public class MatchResultEgressImpl implements MatchResultEgress {
+@Service
+public class MatchResultSideChannel {
 
-    private static final Logger log = LoggerFactory.getLogger(MatchResultEgressImpl.class);
+    private static final Logger log = LoggerFactory.getLogger(MatchResultSideChannel.class);
 
     private final MdcEgressConfig mdcConfig;
     private final IdleStrategy idleStrategy = new YieldingIdleStrategy();
@@ -38,18 +37,22 @@ public class MatchResultEgressImpl implements MatchResultEgress {
     private final MessageHeaderDecoder headerDecoder = new MessageHeaderDecoder();
     private final MatchResultDecoder matchResultDecoder = new MatchResultDecoder();
 
-    /** 唯一 Aeron 连接：MDC MediaDriver（publication + Archive 客户端均在此 driver 上）。 */
+    /**
+     * 唯一 Aeron 连接：MDC MediaDriver（publication + Archive 客户端均在此 driver 上）。
+     */
     private volatile Aeron mdcAeron;
     private volatile AeronArchive aeronArchive;
 
     private ExclusivePublication matchResultPublication;
 
     private long recordingId = -1L;
-    /** Archive 已覆盖的最大 matchSeq；仅当 {@code matchSeq > lastRecordedUpperBound} 才写 publication。 */
-    private long lastRecordedUpperBound = -1L;
+    /**
+     * Archive 已覆盖的最大 matchSeq；仅当 {@code matchSeq > lastRecordedUpperBound} 才写 publication。
+     */
+    private long lastMatchSeq = -1L;
     private final TreeMap<Long, Long> matchSeqIndex = new TreeMap<>();
 
-    public MatchResultEgressImpl(MdcEgressConfig mdcEgressConfig) {
+    public MatchResultSideChannel(MdcEgressConfig mdcEgressConfig) {
         this.mdcConfig = mdcEgressConfig;
     }
 
@@ -61,22 +64,16 @@ public class MatchResultEgressImpl implements MatchResultEgress {
             return;
         }
         closeQuietly();
-        ErrorHandler errorHandler = throwable ->
-                log.error("Aeron internal error (match-result egress)", throwable);
+        ErrorHandler errorHandler = throwable -> log.error("Aeron internal error (match-result egress)", throwable);
         try {
-            Aeron.Context mdcCtx = new Aeron.Context()
-                    .aeronDirectoryName(mdcConfig.getAeronDir())
-                    .errorHandler(errorHandler);
+            Aeron.Context mdcCtx = new Aeron.Context().aeronDirectoryName(mdcConfig.getAeronDir()).errorHandler(errorHandler);
             mdcAeron = Aeron.connect(mdcCtx);
 
             aeronArchive = AeronArchive.connect(archiveClientContext());
-            log.info("MatchResult egress connected: mdcAeronDir={} channel={} streamId={}",
-                    mdcConfig.getAeronDir(), matchResultChannel(), matchResultStreamId());
+            log.info("MatchResult egress connected: mdcAeronDir={} channel={} streamId={}", mdcConfig.getAeronDir(), matchResultChannel(), matchResultStreamId());
         } catch (Exception exception) {
             closeQuietly();
-            throw new IllegalStateException(
-                    "Failed to connect Aeron for match-result egress (mdcDir=" + mdcConfig.getAeronDir() + ")",
-                    exception);
+            throw new IllegalStateException("Failed to connect Aeron for match-result egress (mdcDir=" + mdcConfig.getAeronDir() + ")", exception);
         }
     }
 
@@ -88,21 +85,20 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         return mdcConfig.getStreamId();
     }
 
-    /** spy 录制 channel：读取同 driver 上 publication 的 log buffer。 */
+    /**
+     * spy 录制 channel：读取同 driver 上 publication 的 log buffer。
+     */
     private String spyChannel() {
         return "aeron-spy:" + matchResultChannel();
     }
 
-    /** MDC Archive 本地 IPC 控制上下文（stream id 与 Archive 的 localControlStreamId 对齐）。 */
+    /**
+     * MDC Archive 本地 IPC 控制上下文（stream id 与 Archive 的 localControlStreamId 对齐）。
+     */
     private AeronArchive.Context archiveClientContext() {
         int localRequestStreamId = mdcConfig.getArchiveControlStreamId() + 100;
         int localResponseStreamId = localRequestStreamId + 1;
-        return new AeronArchive.Context()
-                .aeronDirectoryName(mdcConfig.getAeronDir())
-                .controlRequestChannel(MdcEgressConfig.ARCHIVE_LOCAL_CONTROL_CHANNEL)
-                .controlResponseChannel(MdcEgressConfig.ARCHIVE_LOCAL_CONTROL_CHANNEL)
-                .controlRequestStreamId(localRequestStreamId)
-                .controlResponseStreamId(localResponseStreamId);
+        return new AeronArchive.Context().aeronDirectoryName(mdcConfig.getAeronDir()).controlRequestChannel(MdcEgressConfig.ARCHIVE_LOCAL_CONTROL_CHANNEL).controlResponseChannel(MdcEgressConfig.ARCHIVE_LOCAL_CONTROL_CHANNEL).controlRequestStreamId(localRequestStreamId).controlResponseStreamId(localResponseStreamId);
     }
 
     private void closeQuietly() {
@@ -130,22 +126,21 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         connectAeronClientsOrThrow();
     }
 
-    /** 快照恢复：比对共识 nextSeq 与 Archive 上界，必要时 purge 录制并重置 dedup。 */
+    /**
+     * 快照恢复：比对共识 nextSeq 与 Archive 上界，必要时 purge 录制并重置 dedup。
+     */
     private void check(long consensusNextMatchSeq) {
         replayForDedup();
-        long lastArchivedMatchSeq = lastRecordedUpperBound;
+        long lastArchivedMatchSeq = lastMatchSeq;
         if (consensusNextMatchSeq > lastArchivedMatchSeq + 1) {
-            log.warn("Archive mismatch: consensusNextMatchSeq={} > lastArchivedMatchSeq+1={}; purging",
-                    consensusNextMatchSeq, lastArchivedMatchSeq + 1);
+            log.warn("Archive mismatch: consensusNextMatchSeq={} > lastArchivedMatchSeq+1={}; purging", consensusNextMatchSeq, lastArchivedMatchSeq + 1);
             purgeRecording();
             matchSeqIndex.clear();
-            lastRecordedUpperBound = consensusNextMatchSeq - 1;
-            log.info("After purge: dedup upperBound={} (next emit matchSeq={})",
-                    lastRecordedUpperBound, consensusNextMatchSeq);
+            lastMatchSeq = consensusNextMatchSeq - 1;
+            log.info("After purge: dedup upperBound={} (next emit matchSeq={})", lastMatchSeq, consensusNextMatchSeq);
             return;
         }
-        log.info("Archive check OK: consensusNextMatchSeq={} lastArchivedMatchSeq={}",
-                consensusNextMatchSeq, lastArchivedMatchSeq);
+        log.info("Archive check OK: consensusNextMatchSeq={} lastArchivedMatchSeq={}", consensusNextMatchSeq, lastArchivedMatchSeq);
     }
 
     private void purgeRecording() {
@@ -174,7 +169,7 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         if (foundRecordingId < 0) {
             log.info("No existing Archive recording; dedup upperBound=-1");
             recordingId = -1L;
-            lastRecordedUpperBound = -1L;
+            lastMatchSeq = -1L;
             matchSeqIndex.clear();
             return;
         }
@@ -183,7 +178,7 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         long stopPosition = aeronArchive.getStopPosition(recordingId);
         if (stopPosition <= 0) {
             log.info("Recording {} exists but empty; dedup upperBound=-1", recordingId);
-            lastRecordedUpperBound = -1L;
+            lastMatchSeq = -1L;
             matchSeqIndex.clear();
             return;
         }
@@ -192,11 +187,9 @@ public class MatchResultEgressImpl implements MatchResultEgress {
 
         TreeMap<Long, Long> index = new TreeMap<>();
 
-        long sessionId = aeronArchive.startReplay(recordingId, 0, stopPosition,
-                mdcConfig.getReplayChannel(), mdcConfig.getReplayStreamId());
+        long sessionId = aeronArchive.startReplay(recordingId, 0, stopPosition, mdcConfig.getReplayChannel(), mdcConfig.getReplayStreamId());
 
-        try (Subscription replaySub = mdcAeron.addSubscription(
-                mdcConfig.getReplayChannel(), mdcConfig.getReplayStreamId())) {
+        try (Subscription replaySub = mdcAeron.addSubscription(mdcConfig.getReplayChannel(), mdcConfig.getReplayStreamId())) {
 
             Image replayImage = null;
             long deadline = System.currentTimeMillis() + 10_000;
@@ -206,7 +199,7 @@ public class MatchResultEgressImpl implements MatchResultEgress {
             }
             if (replayImage == null) {
                 log.error("Timed out waiting for replay image");
-                lastRecordedUpperBound = -1L;
+                lastMatchSeq = -1L;
                 matchSeqIndex.clear();
                 return;
             }
@@ -220,8 +213,7 @@ public class MatchResultEgressImpl implements MatchResultEgress {
                     return;
                 }
                 int bodyOffset = offset + headerDecoder.encodedLength();
-                matchResultDecoder.wrap(buffer, bodyOffset,
-                        headerDecoder.blockLength(), headerDecoder.version());
+                matchResultDecoder.wrap(buffer, bodyOffset, headerDecoder.blockLength(), headerDecoder.version());
                 long seq = matchResultDecoder.matchSeq();
                 long pos = finalImage.position();
                 index.put(seq, pos);
@@ -235,16 +227,14 @@ public class MatchResultEgressImpl implements MatchResultEgress {
                 idleStrategy.idle(fragments);
             }
 
-            lastRecordedUpperBound = maxSeqHolder[0];
+            lastMatchSeq = maxSeqHolder[0];
         }
 
         matchSeqIndex.clear();
         matchSeqIndex.putAll(index);
-        log.info("Cold-start dedup: upperBound={} indexedEntries={}",
-                lastRecordedUpperBound, matchSeqIndex.size());
+        log.info("Cold-start dedup: upperBound={} indexedEntries={}", lastMatchSeq, matchSeqIndex.size());
     }
 
-    @Override
     public long startMatchResultPipeline(boolean restoredFromSnapshot, long consensusNextMatchSeq) {
         ensureConnected();
         openPublication();
@@ -254,12 +244,9 @@ public class MatchResultEgressImpl implements MatchResultEgress {
             replayForDedup();
         }
         setupRecording();
-        return restoredFromSnapshot
-                ? consensusNextMatchSeq
-                : Math.max(consensusNextMatchSeq, lastRecordedUpperBound + 1);
+        return restoredFromSnapshot ? consensusNextMatchSeq : Math.max(consensusNextMatchSeq, lastMatchSeq + 1);
     }
 
-    @Override
     public void emitEncodedMatchResult(long matchSeq, MutableDirectBuffer buffer, int offset, int length) {
         if (!shouldPublish(matchSeq)) {
             return;
@@ -272,7 +259,6 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         matchSeqIndex.put(matchSeq, position);
     }
 
-    @Override
     public void shutdown() {
         if (matchResultPublication != null) {
             matchResultPublication.close();
@@ -283,13 +269,12 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         log.info("MatchResult egress shut down");
     }
 
-    @Override
     public NavigableMap<Long, Long> getMatchSeqIndex() {
         return Collections.unmodifiableNavigableMap(new TreeMap<>(matchSeqIndex));
     }
 
     private boolean shouldPublish(long matchSeq) {
-        return matchSeq > lastRecordedUpperBound;
+        return matchSeq > lastMatchSeq;
     }
 
     private void openPublication() {
@@ -299,13 +284,13 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         if (mdcAeron == null) {
             throw new IllegalStateException("mdcAeron not connected");
         }
-        matchResultPublication = mdcAeron.addExclusivePublication(
-                matchResultChannel(), matchResultStreamId());
-        log.info("MatchResult publication opened: channel={} streamId={}",
-                matchResultChannel(), matchResultStreamId());
+        matchResultPublication = mdcAeron.addExclusivePublication(matchResultChannel(), matchResultStreamId());
+        log.info("MatchResult publication opened: channel={} streamId={}", matchResultChannel(), matchResultStreamId());
     }
 
-    /** spy + LOCAL：Archive 从同 driver 的 publication log buffer 零拷贝录制。 */
+    /**
+     * spy + LOCAL：Archive 从同 driver 的 publication log buffer 零拷贝录制。
+     */
     private void setupRecording() {
         if (aeronArchive == null) {
             throw new IllegalStateException("AeronArchive not connected");
@@ -314,18 +299,14 @@ public class MatchResultEgressImpl implements MatchResultEgress {
             int recordingInitTermId = queryRecordingInitialTermId(recordingId);
             int publicationInitTermId = matchResultPublication.initialTermId();
             if (recordingInitTermId == publicationInitTermId) {
-                aeronArchive.extendRecording(recordingId, spyChannel(),
-                        matchResultStreamId(), SourceLocation.LOCAL);
+                aeronArchive.extendRecording(recordingId, spyChannel(), matchResultStreamId(), SourceLocation.LOCAL);
                 log.info("Extended spy recording: recordingId={}", recordingId);
                 return;
             }
-            log.warn("initialTermId mismatch: recording={} publication={}; "
-                    + "purging old recording and starting fresh",
-                    recordingInitTermId, publicationInitTermId);
+            log.warn("initialTermId mismatch: recording={} publication={}; " + "purging old recording and starting fresh", recordingInitTermId, publicationInitTermId);
             purgeRecording();
         }
-        aeronArchive.startRecording(spyChannel(),
-                matchResultStreamId(), SourceLocation.LOCAL);
+        aeronArchive.startRecording(spyChannel(), matchResultStreamId(), SourceLocation.LOCAL);
         recordingId = waitForRecordingId();
         log.info("Started spy recording: recordingId={}", recordingId);
     }
@@ -333,14 +314,10 @@ public class MatchResultEgressImpl implements MatchResultEgress {
     private int queryRecordingInitialTermId(long targetRecordingId) {
         int[] termIdHolder = new int[]{0};
         boolean[] foundHolder = new boolean[]{false};
-        aeronArchive.listRecording(targetRecordingId,
-                (controlSessionId, correlationId, recId, startTimestamp, stopTimestamp,
-                 startPosition, stopPosition, initialTermId, segmentFileLength,
-                 termBufferLength, mtuLength, sessionId, streamId,
-                 strippedChannel, originalChannel, sourceIdentity) -> {
-                    termIdHolder[0] = initialTermId;
-                    foundHolder[0] = true;
-                });
+        aeronArchive.listRecording(targetRecordingId, (controlSessionId, correlationId, recId, startTimestamp, stopTimestamp, startPosition, stopPosition, initialTermId, segmentFileLength, termBufferLength, mtuLength, sessionId, streamId, strippedChannel, originalChannel, sourceIdentity) -> {
+            termIdHolder[0] = initialTermId;
+            foundHolder[0] = true;
+        });
         if (!foundHolder[0]) {
             log.warn("Recording {} not found in Archive", targetRecordingId);
             return Integer.MIN_VALUE;
@@ -350,11 +327,7 @@ public class MatchResultEgressImpl implements MatchResultEgress {
 
     private long findExistingRecording(AeronArchive archive) {
         MutableLong found = new MutableLong(-1L);
-        archive.listRecordingsForUri(0, 1, matchResultChannel(), matchResultStreamId(),
-                (controlSessionId, correlationId, recId, startTimestamp, stopTimestamp,
-                 startPosition, stopPosition, initialTermId, segmentFileLength,
-                 termBufferLength, mtuLength, sessionId, streamId,
-                 strippedChannel, originalChannel, sourceIdentity) -> found.set(recId));
+        archive.listRecordingsForUri(0, 1, matchResultChannel(), matchResultStreamId(), (controlSessionId, correlationId, recId, startTimestamp, stopTimestamp, startPosition, stopPosition, initialTermId, segmentFileLength, termBufferLength, mtuLength, sessionId, streamId, strippedChannel, originalChannel, sourceIdentity) -> found.set(recId));
         return found.get();
     }
 
@@ -362,11 +335,7 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         MutableLong found = new MutableLong(-1L);
         long deadline = System.currentTimeMillis() + 10_000;
         while (found.get() < 0 && System.currentTimeMillis() < deadline) {
-            aeronArchive.listRecordingsForUri(0, 1, matchResultChannel(), matchResultStreamId(),
-                    (controlSessionId, correlationId, recId, startTimestamp, stopTimestamp,
-                     startPosition, stopPosition, initialTermId, segmentFileLength,
-                     termBufferLength, mtuLength, sessionId, streamId,
-                     strippedChannel, originalChannel, sourceIdentity) -> found.set(recId));
+            aeronArchive.listRecordingsForUri(0, 1, matchResultChannel(), matchResultStreamId(), (controlSessionId, correlationId, recId, startTimestamp, stopTimestamp, startPosition, stopPosition, initialTermId, segmentFileLength, termBufferLength, mtuLength, sessionId, streamId, strippedChannel, originalChannel, sourceIdentity) -> found.set(recId));
             if (found.get() < 0) {
                 idleStrategy.idle(0);
             }
@@ -377,8 +346,7 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         return found.get();
     }
 
-    private long offerToPublication(ExclusivePublication publication, MutableDirectBuffer buffer,
-                                    int offset, int length) {
+    private long offerToPublication(ExclusivePublication publication, MutableDirectBuffer buffer, int offset, int length) {
         long result;
         do {
             result = publication.offer(buffer, offset, length);
@@ -389,4 +357,5 @@ public class MatchResultEgressImpl implements MatchResultEgress {
         idleStrategy.reset();
         return result;
     }
+
 }

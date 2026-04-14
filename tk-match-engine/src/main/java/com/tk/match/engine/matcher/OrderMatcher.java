@@ -19,7 +19,7 @@ public interface OrderMatcher {
     MatchResult match(BookOrder takerOrder, long orderReqOffset);
 
     /**
-     * 纯参数校验：taker 字段是否满足当前撮合策略与 {@link com.tk.protocol.dto.MarketConfig} 的前置条件。
+     * 纯参数校验：taker 字段是否满足当前撮合策略与 {@link com.tk.protocol.dto.MatchMarketConfig} 的前置条件。
      * <p>
      * <b>只读</b>：不得修改 {@code orderBook} 与 {@code takerOrder}。
      * <p>

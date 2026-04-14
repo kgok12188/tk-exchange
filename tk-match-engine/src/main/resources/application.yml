@@ -1,8 +1,9 @@
 spring:
   application:
     name: tk-match-engine
-  main:
-    web-application-type: none
+
+server:
+  port: ${match.admin.port:8090}
 
 # 仅覆盖与代码默认值不同的路径；其余 Aeron 参数见 ClusterStackConfig / MdcEgressConfig 内默认值
 # cluster-members 紧凑格式：id=host:ingress:consensus:log:catchup:archive ，多节点用 | 分隔
